@@ -2,6 +2,12 @@
 
 An original 3D endless runner controlled with your body or keyboard.
 
+## Screenshots
+
+![Ready screen](screenshots/ready.png)
+
+![A run in progress](screenshots/playing.png)
+
 ## Run locally
 
 Requires Node.js 20.19+ or 22.12+.
