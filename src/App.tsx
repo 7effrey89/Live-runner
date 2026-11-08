@@ -112,7 +112,7 @@ function World({ game, snapshot, onTick }: {
     {[-4, 4].map(x => <mesh key={x} position={[x, 0, -35]}><boxGeometry args={[0.18, 0.18, 160]} /><meshStandardMaterial color="#f7ad92" /></mesh>)}
     {[-1.25, 1.25].map(x => <mesh key={x} rotation={[-Math.PI / 2, 0, 0]} position={[x, 0.005, -35]}><planeGeometry args={[0.035, 160]} /><meshBasicMaterial color="#8f92a9" /></mesh>)}
     {Array.from({ length: 14 }, (_, i) => {
-      const z = -((i * 10 + snapshot.distance % 10) % 140)
+      const z = -((i * 10 - snapshot.distance % 10 + 140) % 140)
       return <group key={i}>
         {[-1, 1].map(side => <group key={side} position={[side * 7, 0, z]}>
           <mesh position={[0, 0.45, 0]}><boxGeometry args={[1.7, 0.9, 1.7]} /><meshStandardMaterial color="#da8e88" /></mesh>
