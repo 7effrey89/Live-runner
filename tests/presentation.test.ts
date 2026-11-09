@@ -7,6 +7,10 @@ import { birdMotion, GROUND_ANIMALS, groundAnimalMotion } from '../src/wildlifeM
 import { roadColor, routeArea, routeCenter, routeElevation, routeHeading, routePoint, ROUTE_LAP_LENGTH, waterSpan } from '../src/route.ts'
 import { ROUTE_ASSETS } from '../src/routeAssets.ts'
 import { MAX_RUN_SPEED, advanceGame, laneX, newGame } from '../src/gameLogic.ts'
+import { requestJump } from '../src/gameLogic.ts'
+import type { Item } from '../src/gameLogic.ts'
+import { jumpTiming } from '../src/difficulty.ts'
+import { GUIDE_TIMING_MARGIN, jumpNow, jumpZone } from '../src/jumpGuidance.ts'
 
 test('scenery loops continuously at the boundary and repeats after 216 meters', () => {
   for (let row = 0; row < 18; row++) {
@@ -186,7 +190,7 @@ test('all areas keep their road palette while lighting changes brightness', () =
 
 test('hazard outcomes do not depend on the scenic region or curved rendering coordinates', () => {
   for (const distance of [0, 350, 750, 990, 1040, 1100, 1800, 2500]) {
-    const game = newGame()
+    const game = newGame('free-run', 2)
     game.phase = 'running'
     game.distance = distance
     game.nextSpawn = 999999
@@ -211,5 +215,84 @@ test('route models, their original CC0 licenses, and referenced palette textures
   for (const folder of ['town', 'mini-forest']) {
     const license = readFileSync(new URL(`../public/assets/kenney/${folder}/License.txt`, import.meta.url), 'utf8')
     assert.match(license, /CC0/)
+  }
+})
+
+test('assisted jump zones sit before barriers and widen with speed and lower difficulty', () => {
+  const item: Item = { id: 1, kind: 'barrier', lane: 0, z: -20, hit: false }
+  for (const speed of [15, 23, 31]) {
+    let previousWidth = Infinity
+    for (const difficulty of [0, .5, 1, 1.5, 2]) {
+      const timing = jumpTiming(difficulty)
+      const zone = jumpZone(item, speed, difficulty)!
+      assert.ok(zone.near > item.z + .9)
+      assert.ok(zone.far > zone.near)
+      assert.ok(Math.abs((zone.far - zone.near) / speed - (timing.end - timing.start - 2 * GUIDE_TIMING_MARGIN)) < 1e-9)
+      assert.ok(zone.far - zone.near < previousWidth)
+      previousWidth = zone.far - zone.near
+    }
+  }
+  const slow = jumpZone(item, 15, 1)!
+  const fast = jumpZone(item, 31, 1)!
+  assert.ok(fast.far - fast.near > slow.far - slow.near)
+})
+
+test('the jump-now cue only recommends grounded, available jumps in the correct lane', () => {
+  const game = newGame()
+  game.phase = 'running'
+  const item: Item = { id: 1, kind: 'barrier', lane: 0, z: -5, hit: false }
+  const timing = jumpTiming(game.difficulty)
+  item.z = -.9 - game.speed * (timing.start + timing.end) / 2
+  game.items = [item]
+  assert.equal(jumpNow(game), true)
+  game.lane = 1
+  assert.equal(jumpNow(game), false)
+  game.lane = 0
+  for (const key of ['jump', 'slide', 'recovery'] as const) {
+    game[key] = .1
+    assert.equal(jumpNow(game), false)
+    game[key] = 0
+  }
+  game.phase = 'ready'
+  assert.equal(jumpNow(game), false)
+  game.phase = 'over'
+  assert.equal(jumpNow(game), false)
+  game.phase = 'running'
+  item.z = -40
+  assert.equal(jumpNow(game), false)
+})
+
+test('guidance never labels non-jumpable, already hit, falling, contacted, or passed obstacles', () => {
+  const item: Item = { id: 1, kind: 'barrier', lane: 0, z: -10, hit: false }
+  for (const kind of ['block', 'overhead', 'coin'] as const) assert.equal(jumpZone({ ...item, kind }, 15, 1), undefined)
+  assert.equal(jumpZone({ ...item, hit: true }, 15, 1), undefined)
+  assert.equal(jumpZone({ ...item, jumpContactAt: 1 }, 15, 1), undefined)
+  assert.equal(jumpZone({ ...item, fall: { age: 0, x: 0, y: 0, vx: 0, vy: 0, angle: 0, spin: 0 } }, 15, 1), undefined)
+  for (const z of [-.9, 0, 4]) assert.equal(jumpZone({ ...item, z }, 15, 1), undefined)
+})
+
+test('jumping at either recommended zone edge clears real barriers at every speed and difficulty', () => {
+  for (const distance of [0, 1440, 2880, 5000]) {
+    for (const difficulty of [0, .5, 1, 1.5, 2]) {
+      for (const delta of [1 / 60, 1 / 30, .05]) {
+        for (const edge of ['near', 'far'] as const) {
+          const game = newGame('survival', difficulty)
+          game.phase = 'running'
+          game.distance = distance
+          advanceGame(game, 0)
+          game.nextSpawn = 10000
+          const item: Item = { id: 1, kind: 'barrier', lane: 0, z: -30, hit: false }
+          const zone = jumpZone(item, game.speed, difficulty)!
+          item.z -= zone[edge]
+          game.items = [item]
+          assert.equal(jumpNow(game), true)
+          requestJump(game)
+          for (let frame = 0; frame < 60 && !item.hit; frame++) advanceGame(game, delta)
+          assert.equal(item.hit, true, `${distance}, ${difficulty}, ${delta}, ${edge}`)
+          assert.equal(item.fall, undefined)
+          assert.equal(game.lives, 5)
+        }
+      }
+    }
   }
 })

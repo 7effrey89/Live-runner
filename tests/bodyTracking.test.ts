@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createBodyTracker, getBodyPosition, isVisiblePoint } from '../src/bodyTracking.ts'
 import type { BodyPoint } from '../src/bodyTracking.ts'
+import { advanceGame, newGame, requestJump } from '../src/gameLogic.ts'
 
 function upperBody(x = 0.5, y = 0.4, width = 0.24): BodyPoint[] {
   const pose = Array.from({ length: 33 }, () => ({ x: 0, y: 0, visibility: 0 }))
@@ -12,10 +13,17 @@ function upperBody(x = 0.5, y = 0.4, width = 0.24): BodyPoint[] {
   return pose
 }
 
-function calibrated(width = 0.24, aspect = 4 / 3, step = 50) {
+function fullBody(shoulderHeight = 0, hipHeight = shoulderHeight, width = .24, aspect = 4 / 3) {
+  const pose = upperBody(.5, .4 - shoulderHeight * width * aspect, width)
+  pose[23] = { x: .5 - width / 3, y: .7 - hipHeight * width * aspect, visibility: .9 }
+  pose[24] = { x: .5 + width / 3, y: .7 - hipHeight * width * aspect, visibility: .9 }
+  return pose
+}
+
+function calibrated(width = 0.24, aspect = 4 / 3, step = 50, neutral = upperBody(.5, .4, width)) {
   const tracker = createBodyTracker()
   let time = 0
-  const feed = (pose = upperBody(0.5, 0.4, width), duration = step) => {
+  const feed = (pose = neutral, duration = step) => {
     const results = []
     for (let elapsed = 0; elapsed < duration; elapsed += step) {
       time += step
@@ -215,4 +223,201 @@ test('slow neutral drift and a stalled frame do not qualify for early intent pre
   for (let t = 0; t <= 1000; t += 50) tracker.update(upperBody(), t)
   assert.equal(tracker.update(upperBody(.5, .4 - .07 * .32), 1200).jump, false)
   assert.equal(tracker.update(upperBody(.5, .4 - .09 * .32), 1217).jump, false)
+})
+
+test('small jumps after bending the knees register at 10 through 60 camera fps', () => {
+  for (const step of [1000 / 60, 1000 / 30, 50, 100]) {
+    for (const width of [.12, .24, .36]) {
+      for (const aspect of [4 / 3, 16 / 9]) {
+        const { feed } = calibrated(width, aspect, step)
+        const poseAt = (height: number) => upperBody(.5, .4 - height * width * aspect, width)
+        feed(poseAt(-.3), 300)
+        const results = [-.15, 0, .07, .14, .16, .08, 0].flatMap(height => feed(poseAt(height)))
+        assert.equal(results.filter(result => result.jump).length, 1, `${step}, ${width}, ${aspect}`)
+        assert.ok(results.findIndex(result => result.jump) <= 4)
+      }
+    }
+  }
+})
+
+test('landing near neutral rearms repeated jumps without requiring the exact calibrated height', () => {
+  for (const step of [1000 / 60, 1000 / 30, 50, 100]) {
+    const { feed } = calibrated(.24, 4 / 3, step)
+    for (let jump = 0; jump < 4; jump++) {
+      const results = [.08, .14, .20, .22, .15, .06].flatMap(height => feed(upperBody(.5, .4 - height * .32)))
+      assert.equal(results.filter(result => result.jump).length, 1, `jump ${jump}, ${step}ms`)
+      feed(upperBody(.5, .4 - .06 * .32), 200)
+    }
+  }
+})
+
+test('a small rise held above neutral fires once, and slow posture changes after a crouch do not jump', () => {
+  const { feed } = calibrated()
+  feed(upperBody(.5, .4 + .3 * .32), 300)
+  const results = [-.1, 0, .08, .14].flatMap(height => feed(upperBody(.5, .4 - height * .32)))
+  results.push(...feed(upperBody(.5, .4 - .14 * .32), 1000))
+  assert.equal(results.filter(result => result.jump).length, 1)
+  feed(undefined, 300)
+  feed(upperBody(.5, .4 + .3 * .32), 300)
+  for (let height = -.3; height < .16; height += .005) {
+    assert.equal(feed(upperBody(.5, .4 - height * .32))[0].jump, false)
+  }
+})
+
+test('successive small camera jumps after crouching reach the running game', () => {
+  for (const step of [1000 / 60, 1000 / 30, 50, 100]) {
+    const { feed } = calibrated(.24, 4 / 3, step)
+    const game = newGame()
+    game.phase = 'running'
+    const apply = (height: number, duration = step) => {
+      for (const motion of feed(upperBody(.5, .4 - height * .32), duration)) {
+        if (!motion.crouching) game.slide = 0
+        if (motion.jump) assert.equal(requestJump(game), true)
+        if (motion.crouching && game.jump === 0) game.slide = .8
+        advanceGame(game, step / 1000, Math.random, { spawn: false })
+      }
+    }
+    for (let jump = 1; jump <= 3; jump++) {
+      apply(-.3, 200)
+      for (const height of [-.15, 0, .07, .14, .16, .08]) apply(height)
+      apply(.06, 700)
+      assert.equal(game.jumpId, jump, `${step}ms camera, jump ${jump}`)
+    }
+  }
+})
+
+test('optional hips calibrate only after a stable neutral hold and do not change the lane anchor', () => {
+  const { feed } = calibrated()
+  assert.equal(feed()[0].jumpTracking, 'shoulders')
+  assert.equal(feed(fullBody())[0].jumpTracking, 'shoulders')
+  const ready = feed(fullBody(), 800).at(-1)!
+  assert.equal(ready.jumpTracking, 'hips')
+  assert.equal(ready.jumpReady, true)
+  assert.equal(ready.jump, false)
+  const leaned = fullBody()
+  leaned[11].x -= .12
+  leaned[12].x -= .12
+  const results = feed(leaned, 300)
+  assert.equal(results.at(-1)?.lane, 1)
+  assert.equal(results.some(result => result.jump), false)
+})
+
+test('hip rise confirms smaller shoulder takeoffs before landing across distances and frame rates', () => {
+  for (const step of [1000 / 60, 1000 / 30, 50, 100]) {
+    for (const width of [.12, .24, .36]) {
+      for (const aspect of [4 / 3, 16 / 9]) {
+        const { feed } = calibrated(width, aspect, step, fullBody(0, 0, width, aspect))
+        assert.equal(feed(undefined, 800).at(-1)?.jumpTracking, 'hips')
+        const results = [[.01, .03], [.03, .08], [.045, .14], [.055, .18], [.06, .20]]
+          .flatMap(([shoulders, hips]) => feed(fullBody(shoulders, hips, width, aspect)))
+        const first = results.findIndex(result => result.jump)
+        assert.ok(first >= 0 && first <= 3, `${step}ms, width ${width}, aspect ${aspect}`)
+        assert.equal(results.filter(result => result.jump).length, 1)
+        assert.equal(feed(fullBody(.06, .20, width, aspect), 500).some(result => result.jump), false)
+      }
+    }
+  }
+})
+
+test('visible stationary hips reject shoulder shrugs but never block raised-hand jumps', () => {
+  const { feed } = calibrated(.24, 4 / 3, 50, fullBody())
+  feed(undefined, 800)
+  assert.equal(feed(fullBody(.3, 0), 400).some(result => result.jump), false)
+  feed(undefined, 300)
+  const hands = fullBody()
+  hands[15].y = hands[16].y = .2
+  assert.equal(feed(hands, 300).filter(result => result.jump).length, 1)
+  feed(fullBody(0, .2), 300)
+  assert.equal(feed(hands, 300).filter(result => result.jump).length, 1)
+})
+
+test('hip spikes, slow posture changes, and crouch recovery do not invent jumps', () => {
+  for (const step of [1000 / 60, 1000 / 30, 50, 100]) {
+    const { feed } = calibrated(.24, 4 / 3, step, fullBody())
+    feed(undefined, 800)
+    const results = feed(fullBody(.05, .6))
+    results.push(...feed(fullBody(.05, 0), 300))
+    results.push(...feed(fullBody(-.3, -.3), 300))
+    for (const height of [-.2, -.1, 0, .04, .08, .12, .08, .04, 0]) {
+      results.push(...feed(fullBody(height, Math.min(height, .03))))
+    }
+    assert.equal(results.some(result => result.jump), false)
+    feed(undefined, 300)
+    for (let height = 0; height < .16; height += .005) {
+      assert.equal(feed(fullBody(height, height))[0].jump, false)
+    }
+  }
+})
+
+test('body jumps rearm on hip landing, not merely when shoulders return to neutral midair', () => {
+  const { feed } = calibrated(.24, 4 / 3, 50, fullBody())
+  feed(undefined, 800)
+  assert.equal(feed(fullBody(.05, .2), 200).filter(result => result.jump).length, 1)
+  assert.equal(feed(fullBody(0, .2), 300).at(-1)?.jumpReady, false)
+  assert.equal(feed(fullBody(.05, .2), 200).some(result => result.jump), false)
+  assert.equal(feed(fullBody(.06, .06), 200).at(-1)?.jumpReady, true)
+  assert.equal(feed(fullBody(.05, .2), 200).filter(result => result.jump).length, 1)
+})
+
+test('missing or invalid hips immediately restore shoulder-only play without a synthetic jump', () => {
+  for (const missing of [23, 24]) {
+    for (const invalid of [{ visibility: .2 }, { x: NaN }, { y: 1.1 }]) {
+      const { feed } = calibrated(.24, 4 / 3, 50, fullBody())
+      feed(undefined, 800)
+      const pose = fullBody()
+      pose[missing] = { ...pose[missing], ...invalid }
+      const motion = feed(pose)[0]
+      assert.equal(motion.jumpTracking, 'shoulders')
+      assert.equal(motion.jump, false)
+      assert.equal(feed(upperBody(.5, .3), 200).filter(result => result.jump).length, 1)
+    }
+  }
+})
+
+test('newly visible hips cannot calibrate during takeoff or fire on reacquisition', () => {
+  const { feed } = calibrated()
+  const results = feed(fullBody(.3, .3), 800)
+  assert.ok(results.every(result => result.jumpTracking === 'shoulders'))
+  feed(fullBody(), 1000)
+  assert.equal(feed(fullBody())[0].jumpTracking, 'hips')
+  feed([])
+  assert.equal(feed(fullBody(.2, .2), 200).some(result => result.jump), false)
+  assert.equal(feed(fullBody(.2, .2))[0].jumpTracking, 'shoulders')
+})
+
+test('neutral reset discards the old hip baseline and learns the new position safely', () => {
+  const tracker = createBodyTracker()
+  for (let time = 0; time <= 2000; time += 50) tracker.update(fullBody(), time)
+  tracker.captureNeutral({ x: .5, y: .5, scale: .32 }, 2050)
+  const pose = fullBody()
+  pose[11].y = pose[12].y = .5
+  pose[15].y = pose[16].y = .7
+  pose[23].y = pose[24].y = .8
+  for (let time = 2100; time <= 3000; time += 50) assert.equal(tracker.update(pose, time).jump, false)
+  assert.equal(tracker.update(pose, 3050).jumpTracking, 'hips')
+})
+
+test('hip-assisted takeoffs after a knee bend start successive game jumps without waiting for landing', () => {
+  for (const step of [1000 / 60, 1000 / 30, 50, 100]) {
+    const { feed } = calibrated(.24, 4 / 3, step, fullBody())
+    feed(undefined, 800)
+    const game = newGame()
+    game.phase = 'running'
+    const apply = (shoulders: number, hips: number, duration = step) => {
+      for (const motion of feed(fullBody(shoulders, hips), duration)) {
+        if (!motion.crouching) game.slide = 0
+        if (motion.jump) assert.equal(requestJump(game), true)
+        if (motion.crouching && game.jump === 0) game.slide = .8
+        advanceGame(game, step / 1000, Math.random, { spawn: false })
+      }
+    }
+    for (let jump = 1; jump <= 3; jump++) {
+      apply(-.3, -.3, 200)
+      for (const [shoulders, hips] of [[-.1, -.1], [0, 0], [.03, .14], [.05, .2], [.06, .22]]) apply(shoulders, hips)
+      assert.equal(game.jumpId, jump, `${step}ms camera, takeoff ${jump}`)
+      apply(.05, .2, 200)
+      assert.equal(game.jumpId, jump)
+      apply(.06, .06, 700)
+    }
+  }
 })

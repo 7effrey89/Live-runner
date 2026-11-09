@@ -25,6 +25,8 @@ type BodyMotion = {
   crouching: boolean
   height: number
   shift: number
+  jumpTracking: 'shoulders' | 'hips'
+  jumpReady: boolean
 }
 
 export function createBodyTracker() {
@@ -45,8 +47,19 @@ export function createBodyTracker() {
   let previousHeight: number | undefined
   let upwardSamples = 0
   let roseFromCrouch = false
+  let hipBaseline: number | undefined
+  let hipCalibration: { y: number; start: number; samples: number } | undefined
+  let filteredHip: number | undefined
+  let previousHipHeight: number | undefined
+  const resetHips = () => {
+    hipBaseline = undefined
+    hipCalibration = undefined
+    filteredHip = undefined
+    previousHipHeight = undefined
+  }
   const inactive = (status: 'calibrating' | 'lost'): BodyMotion => ({
     status, lane: 0, jump: false, crouching: false, height: 0, shift: 0,
+    jumpTracking: 'shoulders', jumpReady: false,
   })
 
   return {
@@ -69,6 +82,7 @@ export function createBodyTracker() {
       previousHeight = undefined
       upwardSamples = 0
       roseFromCrouch = false
+      resetHips()
     },
     update(pose: readonly BodyPoint[], time: number, aspectRatio = 4 / 3, suppressGestures = false): BodyMotion {
       const position = getBodyPosition(pose, aspectRatio)
@@ -85,6 +99,7 @@ export function createBodyTracker() {
         armed = false
         previousHeight = undefined
         upwardSamples = 0
+        resetHips()
         return inactive('lost')
       }
       lastSeen = time
@@ -101,6 +116,7 @@ export function createBodyTracker() {
         previousHeight = undefined
         upwardSamples = 0
         roseFromCrouch = false
+        resetHips()
       }
       if (!baseline) {
         const unstable = !calibration
@@ -132,13 +148,49 @@ export function createBodyTracker() {
       const height = (baseline.y - filtered.y) / baseline.scale
       const rawHeight = (baseline.y - position.y) / baseline.scale
       const rise = previousHeight === undefined ? 0 : rawHeight - previousHeight
-      const rising = dt >= 12 && dt <= 80 && rise > 0.004
+      const rising = dt >= 12 && dt <= 150 && rise > 0.004
       const velocity = rising ? rise * 1000 / dt : 0
       upwardSamples = rising ? upwardSamples + 1 : 0
       previousHeight = rawHeight
+      const leftHip = pose[23]
+      const rightHip = pose[24]
+      let hipHeight: number | undefined
+      let rawHipHeight: number | undefined
+      let hipVelocity = 0
+      if (!isVisiblePoint(leftHip) || !isVisiblePoint(rightHip) || suppressGestures) {
+        resetHips()
+      } else {
+        const hipY = (leftHip.y + rightHip.y) / 2
+        // Learn optional hips only while standing near the shoulder baseline,
+        // never from a newly visible airborne or crouched pose.
+        if (hipBaseline === undefined) {
+          if (Math.abs(rawHeight) < 0.08 && armed && !crouching) {
+            if (!hipCalibration || Math.abs(hipY - hipCalibration.y) > baseline.scale * 0.04) {
+              hipCalibration = { y: hipY, start: time, samples: 1 }
+            } else {
+              hipCalibration.samples++
+              hipCalibration.y += (hipY - hipCalibration.y) / hipCalibration.samples
+            }
+            if (time - hipCalibration.start >= 600 && hipCalibration.samples >= 8) {
+              hipBaseline = hipCalibration.y
+              filteredHip = hipBaseline
+            }
+          } else hipCalibration = undefined
+        }
+        if (hipBaseline !== undefined) {
+          filteredHip = filteredHip === undefined ? hipY : filteredHip + (hipY - filteredHip) * alpha
+          hipHeight = (hipBaseline - filteredHip) / baseline.scale
+          rawHipHeight = (hipBaseline - hipY) / baseline.scale
+          const hipRise = previousHipHeight === undefined ? 0 : rawHipHeight - previousHipHeight
+          if (dt >= 12 && dt <= 150 && hipRise > 0.004) hipVelocity = hipRise * 1000 / dt
+          previousHipHeight = rawHipHeight
+        }
+      }
+      const hipLift = hipHeight === undefined || rawHipHeight === undefined ? undefined : Math.min(hipHeight, rawHipHeight)
       if (height < -0.16) roseFromCrouch = true
       const earlyRise = !roseFromCrouch && upwardSamples >= 2 && height >= 0.06
         && velocity >= 0.8 && height + velocity * 0.07 > 0.18
+        && (hipLift === undefined || hipLift > 0.04)
       const leftWrist = pose[15]
       const rightWrist = pose[16]
       const handsVisible = isVisiblePoint(leftWrist) && isVisiblePoint(rightWrist)
@@ -146,8 +198,16 @@ export function createBodyTracker() {
         ? Math.min(pose[11].y - leftWrist.y, pose[12].y - rightWrist.y) / baseline.scale
         : undefined
       if (crouching && height > -0.10) crouching = false
+      // Small, quick rises count too, including takeoff after bending the knees.
+      // Keep requiring a second elevated sample so a tracking spike cannot jump.
+      const shouldersRaised = height > 0.18
+        || height > 0.10 && (velocity >= 0.6 || candidate === 'body')
+      const hipsRaised = hipLift !== undefined && (hipLift > 0.18
+        || hipLift > 0.10 && (hipVelocity >= 0.5 || candidate === 'body'))
+      const bodyRaised = shouldersRaised && (hipLift === undefined || hipLift > 0.04)
+        || hipsRaised && height > 0.025
       const nextCandidate = height < -0.22 ? 'crouch'
-        : !crouching && height > 0.18 ? 'body'
+        : !crouching && bodyRaised ? 'body'
         : !crouching && handHeight !== undefined && handHeight > 0.20 ? 'hands' : undefined
       if (candidate !== nextCandidate) {
         candidate = nextCandidate
@@ -171,8 +231,8 @@ export function createBodyTracker() {
         jumpSource = 'body'
       }
       const handsNeutral = handHeight !== undefined ? handHeight < 0.10 : jumpSource !== 'hands'
-      const neutralHeight = jumpSource === 'body' ? 0.035 : 0.08
-      if (!jump && Math.abs(height) < neutralHeight && handsNeutral && !crouching) {
+      const hipsNeutral = jumpSource !== 'body' || hipHeight === undefined || Math.abs(hipHeight) < 0.08
+      if (!jump && Math.abs(height) < 0.08 && hipsNeutral && handsNeutral && !crouching) {
         neutralStart ??= time
         if (time - neutralStart >= 60) {
           armed = true
@@ -199,6 +259,8 @@ export function createBodyTracker() {
         crouching,
         height,
         shift,
+        jumpTracking: hipHeight === undefined ? 'shoulders' : 'hips',
+        jumpReady: armed && !crouching && !suppressGestures,
       }
     },
   }

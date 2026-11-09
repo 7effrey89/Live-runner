@@ -10,6 +10,14 @@ const children: Record<PoseBone, string> = {
   RightUpLeg: 'RightLeg', RightLeg: 'RightFoot', RightFoot: 'RightToes',
 }
 
+const slideDirections: Partial<Record<PoseBone, Direction>> = {
+  Spine: [0, .65, -.76],
+  LeftArm: [-.3, -.88, -.3], RightArm: [.3, -.88, -.3],
+  LeftForeArm: [0, -.9, .35], RightForeArm: [0, -.9, .35],
+  LeftUpLeg: [-.1, -.12, .99], LeftLeg: [0, -.08, 1], LeftFoot: [0, 0, 1],
+  RightUpLeg: [.2, -.12, .98], RightLeg: [.1, -.25, -.96], RightFoot: [0, 0, 1],
+}
+
 export function createAvatarRig(model: THREE.Object3D) {
   const bones = new Map<PoseBone, {
     bone: THREE.Bone; axis: THREE.Vector3; rest: THREE.Quaternion
@@ -34,6 +42,7 @@ export function createAvatarRig(model: THREE.Object3D) {
   const axis = new THREE.Vector3()
   const foot = new THREE.Vector3()
   let applied = false
+  let slideBlend = 0
   const footY = () => Math.min(...(['LeftFoot', 'RightFoot'] as const).map(name => bones.get(name)!.bone.getWorldPosition(foot).y))
   const parentInModel = (bone: THREE.Bone) => {
     if (!bone.parent) throw new Error(`Character pose joint has no parent: ${bone.name}`)
@@ -45,9 +54,11 @@ export function createAvatarRig(model: THREE.Object3D) {
       // Remove the previous pose layer before advancing the animation mixer.
       if (applied) bones.forEach(({ bone, base }) => bone.quaternion.copy(base))
     },
-    apply(frame: AvatarFrame | undefined, facingViewer: boolean, sliding: boolean, delta: number) {
+    apply(frame: AvatarFrame | undefined, facingViewer: boolean, sliding: boolean, delta: number, fallen = false, visualScale = 1) {
       const pose = getAvatarPose(frame, facingViewer, performance.now())
-      const crouch = sliding ? Math.max(0.75, pose.crouch) : facingViewer ? pose.crouch : 0
+      const slide = sliding && !facingViewer
+      slideBlend = THREE.MathUtils.damp(slideBlend, slide ? 1 : 0, 1 / .018, delta)
+      const crouch = fallen ? Math.max(0.75, pose.crouch) : facingViewer ? pose.crouch : 0
       const alpha = 1 - Math.exp(-delta / 0.018)
       model.updateWorldMatrix(true, true)
       model.getWorldQuaternion(modelRotation).invert()
@@ -57,14 +68,15 @@ export function createAvatarRig(model: THREE.Object3D) {
         base.copy(bone.quaternion)
         target.copy(base)
         parentInModel(bone)
-        const direction = !facingViewer && (name.includes('Leg') || name.includes('Foot')) ? undefined : pose.directions[name]
+        const direction = slide ? slideDirections[name]
+          : !facingViewer && (name.includes('Leg') || name.includes('Foot')) ? undefined : pose.directions[name]
         if (direction) {
           vector.fromArray(direction).applyQuaternion(parentRotation).normalize()
           axis.copy(entry.axis).applyQuaternion(rest)
           target.setFromUnitVectors(axis, vector).multiply(rest)
         }
         let rotation: Direction | undefined
-        if (name === 'Head') rotation = pose.head
+        if (name === 'Head') rotation = slide ? [.2, 0, 0] : pose.head
         if (crouch > 0) {
           if (name === 'Spine') rotation = [0.25 * crouch, 0, 0]
           if (!direction) {
@@ -84,7 +96,8 @@ export function createAvatarRig(model: THREE.Object3D) {
         bone.updateWorldMatrix(false, true)
       }
       applied = true
-      const lower = THREE.MathUtils.clamp(before - footY(), -0.65, 0)
+      // Bring the sliding soles down to the road surface, not the standing ankle height.
+      const lower = THREE.MathUtils.clamp(before - footY() - .12 * slideBlend, -.95 * visualScale, 0)
       return { lower, shift: pose.shift, lift: pose.lift }
     },
   }

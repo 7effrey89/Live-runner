@@ -9,6 +9,173 @@ import { createBodyTracker, getBodyPosition } from '../src/bodyTracking.ts'
 import type { BodyPoint } from '../src/bodyTracking.ts'
 import { createDualDwellController, getHandPointers } from '../src/handPointer.ts'
 import type { HandPointer } from '../src/handPointer.ts'
+import { DEFAULT_DIFFICULTY, JUMP_CLEAR_START, JUMP_CLEAR_END, jumpTiming } from '../src/difficulty.ts'
+import { clearsBarrier } from '../src/runnerMotion.ts'
+
+function barrierGame(difficulty: number, mode: 'free-run' | 'survival' = 'survival') {
+  const game = newGame(mode, difficulty)
+  game.phase = 'running'
+  game.distance = 100
+  game.nextSpawn = 10000
+  game.items = [{ id: 100, kind: 'barrier', lane: 0, z: -.5, hit: false }]
+  return game
+}
+
+test('difficulty presets and intermediate slider values widen the measured window monotonically', () => {
+  assert.equal(DEFAULT_DIFFICULTY, 1)
+  assert.equal(newGame().difficulty, 1)
+  assert.equal(jumpTiming(0).label, 'Easy')
+  assert.equal(jumpTiming(1).label, 'Normal')
+  assert.equal(jumpTiming(2).label, 'Hard')
+  assert.equal(jumpTiming(0).allowance, .2)
+  assert.equal(jumpTiming(1).allowance, .1)
+  assert.equal(jumpTiming(2).allowance, 0)
+  assert.equal(jumpTiming(.5).label, 'Easy / Normal')
+  assert.equal(jumpTiming(1.5).label, 'Normal / Hard')
+  let previous = Infinity
+  for (let step = 0; step <= 20; step++) {
+    const timing = jumpTiming(step / 10)
+    assert.ok(timing.window < previous)
+    assert.ok(Math.abs(timing.window - (timing.end - timing.start + timing.allowance)) < 1e-9)
+    previous = timing.window
+  }
+  for (const invalid of [-1, 2.1, NaN, Infinity]) assert.throws(() => jumpTiming(invalid), RangeError)
+})
+
+test('Hard exactly preserves height-based clearance and immediately charges mistimed barriers', () => {
+  for (let age = 0; age < JUMP_DURATION + .2; age += .001) {
+    const game = barrierGame(2)
+    game.lastJumpAt = -age
+    const success = clearsBarrier(JUMP_DURATION - age)
+    advanceGame(game, 0)
+    assert.equal(game.items[0].hit && !game.items[0].fall, success, `age ${age}`)
+    assert.equal(game.lives, success ? 5 : 4)
+    assert.equal(game.items[0].jumpContactAt, undefined)
+  }
+})
+
+test('each lower difficulty accepts earlier jumps while retaining strict upper timing limits', () => {
+  for (const difficulty of [0, .5, 1, 1.5, 2]) {
+    const timing = jumpTiming(difficulty)
+    const success = barrierGame(difficulty)
+    success.lastJumpAt = -(timing.end - .001)
+    advanceGame(success, 0)
+    assert.equal(success.items[0].hit, true)
+    assert.equal(success.lives, 5)
+    const expired = barrierGame(difficulty)
+    expired.lastJumpAt = -(timing.end + .001)
+    advanceGame(expired, 0)
+    advanceGame(expired, timing.allowance + .001)
+    assert.equal(expired.lives, 4)
+    assert.ok(expired.items[0].fall)
+  }
+  assert.ok(JUMP_CLEAR_START > .04 && JUMP_CLEAR_START < .05)
+  assert.ok(JUMP_CLEAR_END < JUMP_DURATION)
+})
+
+test('late real jumps save a pending barrier in Easy and Normal, but not after the deadline', () => {
+  for (const difficulty of [0, .5, 1, 1.5]) {
+    const allowance = jumpTiming(difficulty).allowance
+    const saved = barrierGame(difficulty)
+    advanceGame(saved, 0)
+    assert.equal(saved.items[0].jumpContactAt, 0)
+    advanceGame(saved, allowance - .005)
+    assert.equal(saved.lives, 5)
+    assert.equal(requestJump(saved), true)
+    advanceGame(saved, .001)
+    assert.equal(saved.items[0].hit, true)
+    assert.equal(saved.items[0].fall, undefined)
+    assert.equal(saved.items[0].jumpContactAt, undefined)
+    assert.equal(saved.lives, 5)
+    const missed = barrierGame(difficulty)
+    advanceGame(missed, 0)
+    advanceGame(missed, allowance)
+    assert.equal(missed.lives, 4)
+    assert.equal(requestJump(missed), false)
+  }
+})
+
+test('no jump, held crouching, or a lane change cannot silently clear contacted barriers', () => {
+  for (const mode of ['free-run', 'survival'] as const) {
+    for (const action of ['none', 'crouch', 'lane'] as const) {
+      const game = barrierGame(0, mode)
+      advanceGame(game, 0)
+      if (action === 'crouch') game.slide = .8
+      if (action === 'lane') game.lane = 1
+      assert.deepEqual(advanceGame(game, .199), [])
+      assert.deepEqual(advanceGame(game, .002), ['crash'])
+      assert.ok(game.items[0].fall)
+      assert.equal(game.lives, mode === 'survival' ? 4 : 5)
+      assert.equal(game.lastPenalty, mode === 'free-run' ? 100 : 0)
+    }
+  }
+})
+
+test('pending forgiveness does not accept a jump launched after expiry inside a long frame', () => {
+  const game = barrierGame(1)
+  advanceGame(game, 0)
+  advanceGame(game, .08)
+  game.slide = .03
+  requestJump(game)
+  advanceGame(game, .05)
+  assert.equal(game.lives, 4)
+  assert.ok(game.items[0].fall)
+})
+
+test('difficulty changes affect the current run but do not change animations or other hazard rules', () => {
+  const game = barrierGame(2)
+  game.lastJumpAt = -.44
+  game.difficulty = 0
+  advanceGame(game, 0)
+  assert.equal(game.lives, 5)
+  assert.equal(game.items[0].hit, true)
+  for (const difficulty of [0, 1, 2]) {
+    for (const kind of ['overhead', 'block'] as const) {
+      const hazard = barrierGame(difficulty)
+      hazard.items[0].kind = kind
+      requestJump(hazard)
+      assert.equal(hazard.jump, JUMP_DURATION)
+      advanceGame(hazard, .016)
+      assert.equal(hazard.lives, 4)
+      assert.equal(hazard.items[0].jumpContactAt, undefined)
+    }
+  }
+  const restarted = newGame('survival', .7)
+  assert.equal(restarted.difficulty, .7)
+  assert.equal(restarted.time, 0)
+  assert.equal(restarted.lastJumpAt, -Infinity)
+  assert.equal(restarted.items.length, 0)
+})
+
+test('changing to Hard immediately removes pending late-input grace', () => {
+  const game = barrierGame(0)
+  advanceGame(game, 0)
+  advanceGame(game, .03)
+  assert.equal(game.lives, 5)
+  game.difficulty = 2
+  advanceGame(game, 0)
+  assert.equal(game.lives, 4)
+  assert.ok(game.items[0].fall)
+})
+
+test('displayed timing windows match measured successful early and late inputs', () => {
+  for (const difficulty of [0, .5, 1, 1.5, 2]) {
+    let successes = 0
+    for (let offset = -400; offset <= 150; offset++) {
+      const startAt = offset * .002
+      const game = barrierGame(difficulty)
+      if (startAt < 0) game.lastJumpAt = startAt
+      else if (startAt === 0) requestJump(game)
+      advanceGame(game, 0)
+      for (let frame = 0; frame < 110 && !game.items[0].hit; frame++) {
+        if (startAt > 0 && Math.abs(game.time - startAt) < 1e-8) requestJump(game)
+        advanceGame(game, .002)
+      }
+      if (game.items[0].hit && !game.items[0].fall) successes++
+    }
+    assert.ok(Math.abs(successes * .002 - jumpTiming(difficulty).window) < .005, `difficulty ${difficulty}: ${successes * .002}`)
+  }
+})
 
 const obstacle = (id = 0): Item => ({ id, kind: 'block', lane: 0, z: -0.5, hit: false })
 function crossed(): BodyPoint[] {

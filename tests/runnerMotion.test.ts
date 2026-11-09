@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import * as THREE from 'three'
+import { FBXLoader } from 'three/examples/jsm/loaders/FBXLoader.js'
 import { JUMP_DURATION, JUMP_HEIGHT, JUMP_BLEND, JUMP_START_FRACTION, JUMP_RISE_DURATION, JUMP_APEX_END, jumpHeight, clearsBarrier } from '../src/runnerMotion.ts'
 import { getAvatarPose } from '../src/avatarPose.ts'
 import type { AvatarFrame } from '../src/avatarPose.ts'
@@ -115,4 +117,93 @@ test('joint posing bends knees without scaling and restores animation before the
   rig.restore()
   assert.ok(knee.quaternion.angleTo(new THREE.Quaternion()) < 1e-6)
   assert.throws(() => createAvatarRig(new THREE.Group()), /joint missing/)
+})
+
+function slideFixture(visualScale = 1) {
+  const file = readFileSync(new URL('../public/assets/kenney/characters/Model/characterMedium.fbx', import.meta.url))
+  const model = new FBXLoader().parse(file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength), '')
+  const bounds = new THREE.Box3().setFromObject(model)
+  model.scale.setScalar(1.9 / (bounds.max.y - bounds.min.y))
+  model.position.y = -bounds.min.y * model.scale.x
+  const root = new THREE.Group()
+  root.scale.setScalar(visualScale)
+  root.add(model)
+  const rig = createAvatarRig(model)
+  const position = (name: string) => {
+    const bone = model.getObjectByName(name)
+    assert.ok(bone instanceof THREE.Bone)
+    return bone.getWorldPosition(new THREE.Vector3())
+  }
+  const apply = (input: AvatarFrame | undefined, front: boolean, sliding: boolean, delta = 1, fallen = false) => {
+    rig.restore()
+    const body = rig.apply(input, front, sliding, delta, fallen, visualScale)
+    root.position.y = body.lower
+    root.updateWorldMatrix(true, true)
+    return body
+  }
+  return { model, root, rig, position, apply }
+}
+
+test('running slide lowers the real character into a feet-first pose with a tucked trailing leg', () => {
+  const { model, position, apply } = slideFixture()
+  const standingHead = position('Head').y
+  const footHeight = Math.min(position('LeftFoot').y, position('RightFoot').y)
+  const body = apply(undefined, false, true)
+  assert.ok(body.lower < -.4 && body.lower > -.95)
+  assert.ok(position('Head').y < standingHead - .45)
+  assert.ok(position('Head_end').y < 1.4)
+  assert.ok(position('Hips').y < .25)
+  assert.ok(position('LeftFoot').z - position('Hips').z > .5)
+  assert.ok(Math.abs(position('RightFoot').z - position('Hips').z) < .1)
+  assert.ok(position('Head').z < position('Hips').z - .2)
+  assert.ok(Math.abs(Math.min(position('LeftFoot').y, position('RightFoot').y) - (footHeight - .12)) < 1e-8)
+  assert.equal(model.scale.x, model.scale.y)
+  assert.equal(model.scale.x, model.scale.z)
+})
+
+test('scaled multiplayer slides keep their soles on the same road rather than scaling the ground offset', () => {
+  for (const scale of [.825, .55, .4125]) {
+    const { root, position, apply } = slideFixture(scale)
+    root.updateWorldMatrix(true, true)
+    const footHeight = Math.min(position('LeftFoot').y, position('RightFoot').y)
+    const body = apply(undefined, false, true)
+    assert.ok(body.lower < 0 && body.lower > -.95 * scale)
+    assert.ok(Math.abs(Math.min(position('LeftFoot').y, position('RightFoot').y) - (footHeight - .12)) < 1e-8)
+    assert.ok(position('Head_end').y < 1.4 * scale)
+  }
+})
+
+test('slide is independent of webcam arm waving and recovers without accumulating bone transforms', () => {
+  const { model, rig, position, apply } = slideFixture()
+  const knee = model.getObjectByName('LeftLeg')!
+  const restRotation = knee.quaternion.clone()
+  const neutral = apply(undefined, false, true)
+  const slideRotation = knee.quaternion.clone()
+  const slideHead = position('Head').clone()
+  const input = frame()
+  for (let i = 0; i < 120; i++) {
+    input.time = performance.now()
+    const body = apply(input, false, true, 1 / 60)
+    assert.ok(Math.abs(body.lower - neutral.lower) < .001)
+    assert.ok(knee.quaternion.angleTo(slideRotation) < .001)
+    assert.ok(position('Head').distanceTo(slideHead) < .001)
+  }
+  for (let i = 0; i < 15; i++) apply(undefined, false, false, 1 / 60)
+  assert.ok(position('Hips').y > .6)
+  assert.ok(position('Head').y > 1.35)
+  assert.ok(Math.abs(apply(undefined, false, false).lower) < .001)
+  rig.restore()
+  assert.ok(knee.quaternion.angleTo(restRotation) < 1e-6)
+})
+
+test('setup crouching and impact recovery remain distinct from the running slide', () => {
+  const front = slideFixture()
+  const input = frame()
+  input.height = -.65
+  front.apply(input, true, true)
+  assert.ok(front.position('LeftFoot').z - front.position('Hips').z < .3)
+  const fallen = slideFixture()
+  fallen.apply(undefined, false, false, 1, true)
+  assert.ok(fallen.position('LeftFoot').z - fallen.position('Hips').z < .3)
+  assert.ok(fallen.position('LeftLeg').z > fallen.position('Hips').z)
 })

@@ -30,11 +30,71 @@ Enable the camera with your head and both shoulders visible, then hold your neut
 
 Lean left and right to change lanes. Rise up or raise both hands above your shoulders to jump; return to neutral and visibly lower your hands before jumping again. Lower your shoulders by ducking to slide under overhead obstacles; crouching stays active while you duck and releases when you return upright. Movement thresholds scale to your shoulder width, with smoothing and brief confirmation to reject camera jitter. Tracking automatically recalibrates after a prolonged loss of your shoulders. Full-body movement still works. Avoid the tall blocks. Collect stars for 50 points each; distance also earns points, and the course speeds up as you run.
 
+Small, quick rises also register after a preparatory knee bend, with two elevated
+camera samples required to reject isolated tracking spikes. Landing close to your
+calibrated height is enough to prepare the next jump; you do not need to return
+to exactly the same spot. Slow posture changes are not treated as small jumps.
+
+When both hips are clearly visible, another brief still period automatically
+calibrates hip-assisted jumping. Hip rise can confirm a smaller shoulder rise
+and reject shoulder-only shrugs; landing rearms the next body jump. Takeoff
+triggers the game jump immediately after confirmation, not after landing.
+Hips are optional: if either is hidden or low-confidence, shoulder-only controls
+remain available while hip tracking waits for a new stable neutral position.
+Raising both hands still works without moving your hips.
+
+During camera-controlled runs, a large tracking readout stays visible even with
+the sidebar hidden. **Jump registered!** confirms that a jump actually started;
+**Jump queued for landing** means an input is buffered, not started yet.
+The readout also explains tracking loss, calibration, recovery, and menu-pointer
+suppression. Normal ready tracking stays quiet during play; the camera menu
+shows whether hip-assisted or shoulder-only tracking is active.
+
 Alternatively, use the arrow keys or WASD to move, jump, and slide (space also jumps). Click Start Run to play, End Run to return to setup, and Play Again after a run. Give yourself enough clear space to move safely.
+
+### Webcam multiplayer
+
+Up to **four people** can join while the start/setup menu is visible. Enable
+the camera, keep each person's shoulders visible with some space between
+people, and hold still. Joining takes at least 600ms, followed by independent
+neutral calibration. Colored **P1–P4** labels match the camera skeletons,
+avatars, and score cards. Select a player above the character arrows to choose
+that person's skin. Avatars and their obstacle tracks shrink to fit side by side.
+
+**Start Run locks the roster**: newcomers cannot join an active run. Each
+person independently leans, jumps, and slides, with their own stars, score,
+mistakes, and five Survival hearts. One player's pickup or fallen obstacle
+does not remove a teammate's. Eliminated players stop scoring; the shared run
+continues until everyone is out. Free Run keeps all players running.
+The first enrolled player controls the two hand-cursor menu pointers.
+Crossed-arm neutral resets affect only the person making the gesture;
+the sidebar calibration button recalibrates everyone.
+
+Brief tracking loss retains the player's slot and releases their camera slide.
+Return to your labeled position to resume. Matching is based on shoulder
+position, size, and motion, **not facial recognition**: keep apart and avoid
+crossing over each other. Ambiguous overlaps pause controls rather than
+guessing identities; someone standing exactly in a missing player's position
+cannot reliably be distinguished. More simultaneous poses can increase webcam
+inference latency; actual performance depends on the device.
+After End Run or everyone finishes, players can join during setup again.
+**Reset Players** in the camera sidebar clears enrollment and calibration.
+
+Keyboard controls follow the displayed player order:
+
+| Player | Left / right | Jump | Slide |
+|---|---|---|---|
+| First | Arrow keys | Up / Space | Down |
+| Second | A / D | W | S |
+| Third | J / L | I | K |
+| Fourth | F / H | T | G |
+
+Single-player retains both arrow keys and WASD. Turning off the camera during
+a run leaves enrolled players available for keyboard controls.
 
 ### Game modes
 
-Choose a mode before starting:
+Choose a mode in **Game** settings before starting (mode changes are locked during a run):
 
 - **Free Run** (default): mistakes never end the run. Each mistake subtracts
   up to **100 points**, clamped at zero without accumulating score debt.
@@ -51,9 +111,44 @@ are unchanged. Jumping and ducking resume after recovery.
 Jumps still last 0.48 seconds, but rise to the peak in 120ms, hold it for 80ms,
 and then descend. Barrier-clearance height is reached in about 50ms instead
 of 100ms. The animation skips its initial wind-up and blends in over 35ms;
-barrier clearance follows the actual visible height. Jump inputs made within
+Hard difficulty uses the actual visible height for barrier clearance. Jump inputs made within
 100ms before landing (or slide release) are buffered once, then expire; impacts
 and ending a run cancel pending jumps.
+
+### Jump difficulty
+
+The **Jump difficulty** slider in the sidebar's **Game** tab is available
+before and during a run, in both Free Run and Survival. Presets are **Easy**
+(200ms extra early/late allowance), **Normal** (default, 100ms), and **Hard**
+(0ms, the original height-based timing). Drag between presets for 10ms
+increments. The readout shows the allowance and total successful timing window.
+Mouse, keyboard, and camera-dwell preset / minus / plus buttons are supported.
+Your selection is retained when starting another run in the current session.
+
+Lower difficulties accept earlier takeoffs and just-landed jumps, and briefly
+defer a barrier penalty so a real late jump can still save it. No jump still
+costs the usual points or heart when the allowance expires; crouching is never
+guessed to be a jump. Tall blocks, overhead obstacles, speed, scoring, and the
+0.48-second jump animation are unchanged. Changing difficulty does not restart
+the camera or run.
+
+### Assisted mode
+
+Turn on **Assisted mode** below the difficulty slider in **Game** for optional visual
+guidance, before or during a run. A teal arrowed ribbon emphasizes your current
+lane; green road zones appear before low jump barriers in their respective
+lanes. Jump while the runner is in a green zone. The zone brightens and a
+**JUMP NOW** cue appears when you enter it in the correct lane.
+
+Zones use the current speed and difficulty's jump-clearance interval, with a
+60ms margin inside each edge rather than recommending last-moment takeoffs.
+They grow with more forgiving difficulty, follow curves and bridge elevation,
+and disappear after passing or clearing an obstacle. The late-input allowance
+can still save a jump after leaving the recommended zone.
+Overhead obstacles and tall blocks are never marked as jumpable.
+This option does not jump automatically, change scoring, or alter collision
+rules. It works with camera, keyboard, Free Run, and Survival, and stays selected
+for subsequent runs in the current session.
 
 A vertical speedometer on the far left shows current forward speed in m/s,
 with the same 15 minimum and 31 maximum used by the game simulation.
@@ -66,13 +161,25 @@ red-shirt skater, dark-outfit skater, white-outfit agent, or cyborg.
 Selection works with a mouse, keyboard, or the camera hand cursor, and remains
 selected when you play again. Start is disabled while character assets load.
 
-The setup menu is a compact bottom dock rather than a screen-covering overlay.
-There is one game canvas, and the actual on-lane runner faces you unobstructed.
+The compact setup menu sits above the runner, keeping Start Run in the upper
+half of the screen where hand pointing is easier. Its mode shortcut opens
+**Game** settings rather than repeating mode descriptions over the game.
+Translucent idle silhouettes stand on both sides of a solo runner, each with a
+**+ Join** button that opens the camera controls. These are invitations, not
+enrolled players: they disappear when another real player joins or a run starts.
+There is one game canvas, and the actual on-lane runner faces you.
 With the camera enabled, visible shoulders, elbows,
 wrists, and facial landmarks drive arm waves, body lean, and head turns.
 Visible legs also follow your pose before a run; legs are never required.
 Crouching bends the hips, knees, and ankles instead of shrinking the character.
-Crouches hold a bent idle stance and resume running when you return upright.
+Before a run, crouches mirror your bent-knee stance. During play, crouching
+instead triggers a low feet-first slide: one leg extended, the other tucked,
+torso leaning back, and arms bracing beside the body. The pose stays active
+while you crouch and returns to running when you stand upright. Down/S uses
+the same slide pose for the existing 0.8-second keyboard action.
+This is a procedural skeletal pose using the existing character rig, not a
+downloaded slide animation. Jump timing, speed, and overhead clearance rules
+are unchanged; sliding remains separate from fall/stumble recovery.
 During runs, upper-body posing follows the camera while the running/jumping
 animations and keyboard controls remain active. This is pose-based motion,
 not detailed finger or facial-expression tracking. Missing or stale landmarks
@@ -162,12 +269,27 @@ not an intention classifier; capture and synchronous inference still contribute
 latency, so real-camera testing remains important.
 
 Use `npm run build` for a production build and `npm run lint` to check the code.
+Run the regression suite with `node --test tests/*.test.ts`.
 
 The game fills the entire browser window by default. The camera and movement
-guide float in a scrollable sidebar in the upper-right corner. Use **Hide
+guide float in a scrollable sidebar in the upper-right corner, open to
+**Camera & Guide** by default. Camera activation remains manual.
+Use **Hide
 Controls** or **Show Controls** to toggle it without stopping camera tracking.
-The **Camera & Guide**, **Audio**, and **Scenery** views share the sidebar; tracking continues
-when the audio settings are displayed. Recalibration is a filled crosshair-icon
+Text is sized for playing away from the screen: scores and jump cues are larger,
+and controls and instructions scale up with the viewport. The sidebar and setup
+dock remain scrollable on smaller screens.
+Menu tabs wrap into rows to stay fully visible with larger text, without
+horizontal scrolling.
+The **Game**, **Camera & Guide**, **Audio**, **Scenery**, and **FPS** views share the sidebar.
+**FPS** shows game-rendering and completed pose-tracking frame rates, updated
+once per second using actual elapsed time. Stalled streams report zero; tracking
+shows **Camera off** or **Unavailable** when appropriate. These readouts appear
+only in the FPS view and do not activate the camera.
+Jump difficulty and Assisted mode appear only in **Game**, not above the other
+views. Game mode selection also lives there. The movement guide expands with
+**How to play**, keeping detailed instructions out of the default view.
+Tracking continues when switching views. Recalibration is a filled crosshair-icon
 button below the camera controls.
 Use **Fullscreen** to hide browser chrome; use **Exit Fullscreen** or Escape to
 leave it. Browser fullscreen requires a mouse click or keyboard activation,
