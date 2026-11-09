@@ -1,4 +1,7 @@
-export type SoundEffect = 'step' | 'jump' | 'slide' | 'coin' | 'crash'
+import { AMBIENT_SOUNDS, SYNTH_EFFECTS, synthesizeAbilitySound } from './abilityAudio.ts'
+import type { AbilitySound, AmbientSound } from './abilityAudio.ts'
+
+export type SoundEffect = 'step' | 'jump' | 'slide' | 'coin' | 'crash' | AbilitySound
 export const SOUND_FILES = {
   stepA: 'footstep_concrete_000.ogg',
   stepB: 'footstep_concrete_001.ogg',
@@ -48,6 +51,8 @@ export class GameAudio {
   private musicSource: AudioBufferSourceNode | undefined
   private buffers = new Map<string, AudioBuffer>()
   private effects = new Set<AudioBufferSourceNode>()
+  private ambient = new Map<AmbientSound, AudioBufferSourceNode>()
+  private powerUps = { sword: false, invincibility: false }
   private loading: Promise<void> | undefined
   private ready = false
   private disposed = false
@@ -67,6 +72,7 @@ export class GameAudio {
       this.musicGain?.gain.setTargetAtTime(music, this.context.currentTime, 0.03)
       this.effectsGain?.gain.setTargetAtTime(effects, this.context.currentTime, 0.03)
     }
+    this.syncAmbience()
   }
 
   async unlock() {
@@ -91,7 +97,10 @@ export class GameAudio {
       this.loading = undefined
       throw error
     }
-    if (!this.disposed) this.startMusic()
+    if (!this.disposed) {
+      this.startMusic()
+      this.syncAmbience()
+    }
   }
 
   private async load(context: AudioContext) {
@@ -107,6 +116,12 @@ export class GameAudio {
     if (this.disposed) return
     this.music = music
     entries.forEach(([key], i) => this.buffers.set(key, sounds[i]))
+    for (const effect of [...SYNTH_EFFECTS, ...AMBIENT_SOUNDS]) {
+      const samples = synthesizeAbilitySound(effect, context.sampleRate)
+      const buffer = context.createBuffer(1, samples.length, context.sampleRate)
+      buffer.copyToChannel(samples, 0)
+      this.buffers.set(effect, buffer)
+    }
     this.ready = true
   }
 
@@ -129,6 +144,39 @@ export class GameAudio {
       this.musicSource = undefined
       this.effects.forEach(source => source.stop())
       this.effects.clear()
+    }
+    this.syncAmbience()
+  }
+
+  setPowerUpAmbience(sword: boolean, invincibility: boolean) {
+    if (this.powerUps.sword === sword && this.powerUps.invincibility === invincibility) return
+    this.powerUps = { sword, invincibility }
+    this.syncAmbience()
+  }
+
+  private syncAmbience() {
+    for (const sound of AMBIENT_SOUNDS) {
+      const wanted = sound === 'saberHum' ? this.powerUps.sword : this.powerUps.invincibility
+      const playing = this.ambient.get(sound)
+      const enabled = wanted && this.active && this.ready && !this.disposed && this.effectsVolume > 0 && this.context?.state === 'running'
+      if (!enabled && playing) {
+        this.ambient.delete(sound)
+        playing.stop()
+        playing.disconnect()
+      } else if (enabled && !playing && this.context && this.effectsGain) {
+        const buffer = this.buffers.get(sound)
+        if (!buffer) throw new Error(`Ability ambience is not loaded: ${sound}`)
+        const source = this.context.createBufferSource()
+        source.buffer = buffer
+        source.loop = true
+        source.connect(this.effectsGain)
+        source.onended = () => {
+          if (this.ambient.get(sound) === source) this.ambient.delete(sound)
+          source.disconnect()
+        }
+        this.ambient.set(sound, source)
+        source.start()
+      }
     }
   }
 

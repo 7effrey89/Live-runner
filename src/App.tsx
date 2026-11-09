@@ -1,7 +1,5 @@
 import { Canvas, useFrame, useLoader } from '@react-three/fiber'
 import { PoseLandmarker } from '@mediapipe/tasks-vision'
-import wasmLoaderPath from '@mediapipe/tasks-vision/vision_wasm_internal.js?url'
-import wasmBinaryPath from '@mediapipe/tasks-vision/vision_wasm_internal.wasm?url'
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MutableRefObject } from 'react'
 import * as THREE from 'three'
@@ -28,23 +26,36 @@ import type { TimeOfDay } from './scenery'
 import { routeArea, routePoint } from './route'
 import { DEFAULT_DIFFICULTY } from './difficulty'
 import { DifficultyControl } from './DifficultyControl'
+import { DebugSettings } from './DebugSettings'
+import { createSpawnOverrides } from './debugMode'
+import type { SpawnOverrides } from './debugMode'
 import { AssistedGuidance } from './AssistedGuidance'
 import { jumpNow } from './jumpGuidance'
 import { advanceMultiplayer, avatarScale, createPlayers, keyboardControl, MAX_PLAYERS, PLAYER_COLORS, playerOffset, setPlayerDifficulty, snapshotPlayers, stopPlayers } from './multiplayer'
 import type { PlayerSnapshot, RunnerPlayer } from './multiplayer'
 import { createPlayerRoster } from './playerTracking'
 import { createFrameRateCounter } from './frameRate'
+import { createArmSwingTracker } from './armSwing'
+import { createPoseTracker } from './poseTracker'
+import { ABILITY_DURATION, ABILITY_LABELS, abilityCountdown, attackWithAbility, SABER_PALETTE } from './powerUps'
+import { FireballProjectiles, InvincibilityAura, MysteryBox, RunnerEquipment } from './PowerUpVisuals'
+import { createInvincibilityEffect } from './invincibility'
+import { useReducedMotion } from './useReducedMotion'
 import './App.css'
 
 const characterAssetRoot = `${import.meta.env.BASE_URL}assets/kenney/characters/`
-type RunnerProjection = { x: number; y: number; width: number; feetOffset: number; labelX: number; labelY: number; visible: boolean }
+type RunnerProjection = {
+  x: number; y: number; width: number; feetOffset: number; labelX: number; labelY: number; visible: boolean
+  back: { x: number; y: number; width: number; visible: boolean }
+}
 type LobbySide = 'left' | 'right'
 type CameraPlayerStatus = {
-  id: number; ready: boolean; status: string; jumpRegistered: boolean; jumpTracking: 'shoulders' | 'hips'
+  id: number; ready: boolean; status: string; jumpTracking: 'shoulders' | 'hips'
   showFeedback: boolean
 }
 type CameraController = {
   body: ReturnType<typeof createBodyTracker>; cross: ReturnType<typeof createCrossedArmsCalibrator>
+  attack: ReturnType<typeof createArmSwingTracker>
   sliding: boolean; enrolledAt: number
   jumpFeedback?: { game: Game; jumpId: number; until: number; queued: boolean }
 }
@@ -90,6 +101,14 @@ function Runner({ game, course, character, onLoadingChange, avatars, onProject, 
     return copy
   }, [source, silhouette])
   const rig = useMemo(() => createAvatarRig(model), [model])
+  const backBone = useMemo(() => {
+    const bone = model.getObjectByName('Chest')
+    if (!(bone instanceof THREE.Bone)) throw new Error('Power-up anchor joint missing: Chest')
+    return bone
+  }, [model])
+  const setInvincibility = useMemo(() => createInvincibilityEffect(model), [model])
+  const reducedMotion = useReducedMotion()
+  useEffect(() => () => setInvincibility(false, 0), [setInvincibility])
   const sizing = useMemo(() => {
     const box = new THREE.Box3().setFromObject(source)
     const height = box.max.y - box.min.y
@@ -157,6 +176,8 @@ function Runner({ game, course, character, onLoadingChange, avatars, onProject, 
   useFrame(({ camera, size }, delta) => {
     if (!runner.current) return
     const g = game.current
+    const invisible = !silhouette && g.phase === 'running' && g.ability?.kind === 'invisibility' && g.ability.remaining > 0
+    setInvincibility(invisible, g.time, reducedMotion)
     const scale = avatarScale(count) * (silhouette ? .72 : 1)
     const facingViewer = course.current.phase !== 'running' && g.recovery === 0
     runner.current.visible = course.current.phase !== 'running' || g.phase !== 'over' || g.recovery > 0
@@ -191,6 +212,16 @@ function Runner({ game, course, character, onLoadingChange, avatars, onProject, 
     runner.current.rotation.y = point.heading + (facingViewer ? 0 : Math.PI)
     if (g.recovery > 0) runner.current.position.y = Math.max(point.y + .04 * scale, runner.current.position.y) + reaction.lift * scale
     {
+      backBone.getWorldPosition(projected)
+      const { x: backWorldX, y: backWorldY, z: backWorldZ } = projected
+      projected.project(camera)
+      const backX = (projected.x * .5 + .5) * size.width
+      const backY = (-projected.y * .5 + .5) * size.height
+      const backVisible = runner.current.visible && g.phase === 'running'
+        && Math.abs(projected.x) <= 1 && Math.abs(projected.y) <= 1 && Math.abs(projected.z) <= 1
+      const span = count > 1 ? 2.1 / count : 1.6 * scale
+      projected.set(backWorldX + span * Math.cos(point.heading), backWorldY, backWorldZ - span * Math.sin(point.heading)).project(camera)
+      const backWidth = Math.max(24, Math.min(count > 1 ? 100 : 160, Math.abs((projected.x * .5 + .5) * size.width - backX) * (count > 1 ? .8 : 1)))
       const { x, y, z } = runner.current.position
       projected.set(x, y + 1.95 * scale, z).project(camera)
       const labelX = (projected.x * .5 + .5) * size.width
@@ -205,11 +236,14 @@ function Runner({ game, course, character, onLoadingChange, avatars, onProject, 
         x: centerX, y: centerY, width: radius * 2 + 46,
         feetOffset: (-projected.y * 0.5 + 0.5) * size.height - centerY,
         labelX, labelY, visible: runner.current.visible,
+        back: { x: backX, y: backY, width: backWidth, visible: backVisible },
       })
     }
   })
   return <group ref={runner} name={silhouette ? `multiplayer-silhouette-${silhouette}` : id === 0 ? 'runner-root' : `runner-root-${id}`} scale={avatarScale(count) * (silhouette ? .72 : 1)} dispose={null}>
     <primitive object={model} scale={sizing.scale} position={[0, sizing.offset, 0]} />
+    {!silhouette && <RunnerEquipment game={game} course={course} model={model} index={index} count={count} />}
+    {!silhouette && <InvincibilityAura game={game} reducedMotion={reducedMotion} />}
   </group>
 }
 
@@ -231,7 +265,7 @@ function Obstacle({ item, game, id, index, count }: { item: Item; game: MutableR
   useFrame(() => {
     if (!root.current) return
     const fall = item.fall
-    root.current.visible = !(item.kind === 'coin' && item.hit)
+    root.current.visible = !((item.kind === 'coin' || item.kind === 'mystery') && item.hit)
     const scale = avatarScale(count)
     const point = routePoint(game.current.distance, item.z, laneX(item.lane) + playerOffset(index, count) + (fall?.x ?? 0) / count)
     root.current.position.set(point.x, point.y + ((fall?.y ?? 0) + (fall ? Math.sin(fall.angle) * (item.kind === 'overhead' ? .275 : .4) : 0)) * scale, point.z)
@@ -240,7 +274,7 @@ function Obstacle({ item, game, id, index, count }: { item: Item; game: MutableR
     if (fall) fadeObstacle(root.current, fallOpacity(fall.age))
   })
   return <group ref={root} name={count === 1 ? `obstacle-${item.id}` : `obstacle-${item.id}-p${id}`} scale={[1 / count, avatarScale(count), avatarScale(count)]}>
-  {item.kind === 'coin' ? <group position={[0, 1.1, 0]} rotation={[0, 0, 0.25]}>
+  {item.kind === 'mystery' ? <MysteryBox /> : item.kind === 'coin' ? <group position={[0, 1.1, 0]} rotation={[0, 0, 0.25]}>
     <mesh><torusGeometry args={[0.38, 0.11, 8, 24]} /><meshStandardMaterial color="#ffdb61" emissive="#d77b1a" emissiveIntensity={0.5} /></mesh>
     <mesh><sphereGeometry args={[0.12, 12, 8]} /><meshBasicMaterial color="#fff4b1" /></mesh>
   </group> : item.kind === 'overhead' ? <group>
@@ -257,16 +291,35 @@ function Obstacle({ item, game, id, index, count }: { item: Item; game: MutableR
   </group>
 }
 
-function World({ game, playerSnapshots, onTick, onFrame, characters, onLoadingChange, playEffect, avatars, timeOfDay, onProject, onProjectHint, showMultiplayerHint, assisted }: {
+function PowerUpStatus({ game, id, compact }: { game: Game; id: number; compact: boolean }) {
+  if (game.phase !== 'running') return null
+  const ability = game.ability
+  const countdown = abilityCountdown(ability)
+  const seconds = ability ? Math.ceil(ability.remaining) : 0
+  const shortNames = { invisibility: 'INV', sword: 'SWD', blaster: 'GUN', fireball: 'FIRE' }
+  return <>
+    {ability && <div className={`powerup-status${countdown !== undefined ? ' expiring' : ''}`} role="status" aria-label={`P${id + 1} ${ABILITY_LABELS[ability.kind]} ability`} data-ability={ability.kind}
+      style={{ color: ability.kind === 'sword' && countdown === undefined ? SABER_PALETTE[ability.saberColor] : undefined }}>
+      <strong title={ABILITY_LABELS[ability.kind]}>{compact ? shortNames[ability.kind] : ABILITY_LABELS[ability.kind]}</strong>
+      <b className="powerup-countdown" aria-label={`${seconds} second${seconds === 1 ? '' : 's'} remaining`}>{seconds}</b>
+      <span className="ability-meter" aria-hidden="true"><i style={{ width: `${ability.remaining / ABILITY_DURATION * 100}%` }} /></span>
+    </div>}
+    {game.pickup && (game.pickup.kind === 'life' || game.pickup.kind === 'coin') && <p className="powerup-pickup" role="status">{game.pickup.kind === 'life' ? '+1 life' : '+1 coin'}</p>}
+  </>
+}
+
+function World({ game, playerSnapshots, onTick, onFrame, characters, onLoadingChange, playEffect, setPowerUpAmbience, avatars, timeOfDay, onProject, onProjectHint, showMultiplayerHint, assisted, spawnOverrides }: {
   game: MutableRefObject<Game>; playerSnapshots: PlayerSnapshot[]; onTick: () => void
   onFrame: () => void
   characters: CharacterId[]; onLoadingChange: (loading: boolean) => void
   playEffect: (effect: SoundEffect) => void
+  setPowerUpAmbience: (sword: boolean, invincibility: boolean) => void
   avatars: MutableRefObject<Record<number, AvatarFrame | undefined>>; timeOfDay: TimeOfDay
   onProject: (id: number, projection: RunnerProjection) => void
   onProjectHint: (side: LobbySide, projection: RunnerProjection) => void
   showMultiplayerHint: boolean
   assisted: boolean
+  spawnOverrides?: SpawnOverrides
 }) {
   const players = playerSnapshots.map(player => player.source)
   const elapsed = useRef(0)
@@ -274,11 +327,14 @@ function World({ game, playerSnapshots, onTick, onFrame, characters, onLoadingCh
   const jumpCue = useRef(false)
   const viewTarget = useRef(new THREE.Vector3(0, 0.5, 0))
   const target = useMemo(() => new THREE.Vector3(), [])
+  useEffect(() => () => setPowerUpAmbience(false, false), [setPowerUpAmbience])
   useFrame(({ camera }, delta) => {
     onFrame()
     const g = game.current
     const wasAnimating = g.phase === 'running' || players.some(player => player.game.current.recovery > 0 || player.game.current.items.some(item => item.fall))
-    advanceMultiplayer(g, players, delta).forEach(playEffect)
+    advanceMultiplayer(g, players, delta, Math.random, spawnOverrides).forEach(playEffect)
+    const activeAbilities = players.filter(player => player.game.current.phase === 'running').map(player => player.game.current.ability?.kind)
+    setPowerUpAmbience(g.phase === 'running' && activeAbilities.includes('sword'), g.phase === 'running' && activeAbilities.includes('invisibility'))
     const preview = g.phase !== 'running' && players.every(player => player.game.current.recovery === 0)
     const alpha = 1 - Math.exp(-delta * 7)
     const cameraPoint = routePoint(g.distance, preview ? 6 : 9)
@@ -311,6 +367,9 @@ function World({ game, playerSnapshots, onTick, onFrame, characters, onLoadingCh
       {players.map((player, index) => <Runner key={player.id} game={player.game} course={game} character={characters[player.id]} onLoadingChange={onLoadingChange} avatars={avatars} onProject={onProject} id={player.id} index={index} count={players.length} />)}
       {showMultiplayerHint && (['left', 'right'] as const).map(side => <Runner key={side} silhouette={side} game={players[0].game} course={game} character={characters[players[0].id]} avatars={avatars} onProject={(_id, projection) => onProjectHint(side, projection)} id={players[0].id} index={0} count={1} />)}
     </Suspense>
+    {playerSnapshots.map((player, index) => <FireballProjectiles key={player.id}
+      projectiles={player.game.ability?.kind === 'fireball' ? player.game.ability.fireballs : []}
+      game={player.source.game} course={game} id={player.id} index={index} count={players.length} />)}
   </>
 }
 
@@ -341,6 +400,8 @@ function App() {
   const [mode, setMode] = useState<Mode>('free-run')
   const [difficulty, setDifficulty] = useState(DEFAULT_DIFFICULTY)
   const [assisted, setAssisted] = useState(false)
+  const [debugEnabled, setDebugEnabled] = useState(false)
+  const [spawnOverrides, setSpawnOverrides] = useState(createSpawnOverrides)
   const [snapshot, setSnapshot] = useState<Game>(newGame)
   const [playerSnapshots, setPlayerSnapshots] = useState<PlayerSnapshot[]>(() => snapshotPlayers(initialPlayers))
   const [characters, setCharacters] = useState<CharacterId[]>(() => CHARACTERS.map(option => option.id))
@@ -381,12 +442,20 @@ function App() {
     hint.hidden = !visible
   }, [])
   const playerLabels = useRef<Record<number, HTMLDivElement | null>>({})
-  const projectPicker = useCallback((id: number, { x, y, width, feetOffset, labelX, labelY, visible }: RunnerProjection) => {
+  const playerPowerUps = useRef<Record<number, HTMLDivElement | null>>({})
+  const projectPicker = useCallback((id: number, { x, y, width, feetOffset, labelX, labelY, visible, back }: RunnerProjection) => {
     const label = playerLabels.current[id]
     if (label) {
       label.style.left = `${labelX}px`
       label.style.top = `${labelY}px`
       label.hidden = !visible
+    }
+    const powerUp = playerPowerUps.current[id]
+    if (powerUp) {
+      powerUp.style.left = `${back.x}px`
+      powerUp.style.top = `${back.y}px`
+      powerUp.style.setProperty('--powerup-width', `${back.width}px`)
+      powerUp.hidden = !back.visible
     }
     if (!picker.current || id !== selectedPlayerRef.current) return
     picker.current.style.left = `${x}px`
@@ -400,13 +469,17 @@ function App() {
     setSnapshot({ ...game.current, items: [...game.current.items] })
     setPlayerSnapshots(snapshotPlayers(players.current))
   }, [])
-  const act = useCallback((action: 'left' | 'right' | 'jump' | 'slide', id = players.current[0].id) => {
+  const act = useCallback((action: 'left' | 'right' | 'jump' | 'slide' | 'attack', id = players.current[0].id, hand: Hand = 'right') => {
     const g = players.current.find(player => player.id === id)?.game.current
     if (!g || g.phase !== 'running' || game.current.phase !== 'running') return
     if (action === 'left') g.lane = Math.max(-1, g.lane - 1) as Lane
     if (action === 'right') g.lane = Math.min(1, g.lane + 1) as Lane
     if (action === 'jump' && requestJump(g)) {
       playEffect('jump')
+    }
+    if (action === 'attack') {
+      const sound = attackWithAbility(g, hand)
+      if (sound) playEffect(sound)
     }
     if (action === 'slide' && g.jump === 0 && g.recovery === 0) {
       if (g.slide === 0) playEffect('slide')
@@ -473,7 +546,7 @@ function App() {
     if (!cameraOn) return
     let cancelled = false
     let stream: MediaStream | undefined
-    let detector: PoseLandmarker | undefined
+    let detector: ReturnType<typeof createPoseTracker> | undefined
     let frame = 0
     let videoFrame: number | undefined
     let lastVideoTime = -1
@@ -553,18 +626,13 @@ function App() {
       try {
         setCameraFailed(false)
         setCameraStatus('Starting camera…')
-        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480, frameRate: { ideal: 60 } }, audio: false })
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: 640, height: 480, frameRate: { ideal: 30, max: 30 } }, audio: false })
         if (cancelled) { stream.getTracks().forEach(track => track.stop()); return }
         if (!video) { stream.getTracks().forEach(track => track.stop()); return }
         video.srcObject = stream
         await video.play()
         if (cancelled) return
         setCameraStatus('Loading body tracking…')
-        detector = await PoseLandmarker.createFromOptions({ wasmLoaderPath, wasmBinaryPath }, {
-          baseOptions: { modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task' },
-          runningMode: 'VIDEO', numPoses: MAX_PLAYERS,
-        })
-        if (cancelled) { detector.close(); return }
         const scheduleDetection = () => {
           if (previewVisibleRef.current && typeof video.requestVideoFrameCallback === 'function') videoFrame = video.requestVideoFrameCallback(detect)
           else frame = requestAnimationFrame(detect)
@@ -573,9 +641,17 @@ function App() {
           videoFrame = undefined
           if (cancelled || !detector) return
           try {
-            if (video.readyState >= 2 && video.currentTime !== lastVideoTime) {
-              lastVideoTime = video.currentTime
-              const result = detector.detectForVideo(video, time)
+            if (video.readyState >= 2 && video.currentTime !== lastVideoTime && detector.detect(video, time)) lastVideoTime = video.currentTime
+            scheduleDetection()
+          } catch (error) {
+            fail(error)
+          }
+        }
+        detector = createPoseTracker({
+          numPoses: MAX_PLAYERS,
+          onError: fail,
+          onResult: (result, time) => {
+              if (cancelled) return
               frameRates.tracking.record()
               lastPoseTime.current = time
               const aspect = video.videoWidth / video.videoHeight
@@ -617,7 +693,7 @@ function App() {
                     players.current = players.current.map(player => player.id === id ? createPlayers([id], game.current.mode, game.current.difficulty)[0] : player)
                     refresh()
                   }
-                  controller = { body: createBodyTracker(), cross: createCrossedArmsCalibrator(), sliding: false, enrolledAt: assignment.enrolledAt }
+                  controller = { body: createBodyTracker(), cross: createCrossedArmsCalibrator(), attack: createArmSwingTracker(), sliding: false, enrolledAt: assignment.enrolledAt }
                   controllers.set(id, controller)
                 }
                 const gesture = controller.cross.update(pose, time, aspect)
@@ -634,8 +710,11 @@ function App() {
                   pose, worldPose: poseIndex === undefined ? [] : result.worldLandmarks[poseIndex] ?? [],
                   time, aspectRatio: aspect, height: motion.height, shift: motion.shift,
                 }
-                previews.push({ id, pose: [...pose] })
+                if (previewVisibleRef.current) previews.push({ id, pose })
                 const player = players.current.find(value => value.id === id)?.game.current
+                const canAttack = motion.status === 'tracking' && game.current.phase === 'running' && player?.phase === 'running'
+                  && (player.ability?.kind === 'sword' || player.ability?.kind === 'fireball') && !pointing && !gesture.active && player.recovery === 0
+                if (controller.attack.update(pose, time, aspect, !canAttack)) act('attack', id, controller.attack.hand)
                 if (controller.jumpFeedback && controller.jumpFeedback.game !== player) controller.jumpFeedback = undefined
                 if (controller.jumpFeedback?.queued && player) {
                   if (player.jumpId !== controller.jumpFeedback.jumpId) {
@@ -671,33 +750,34 @@ function App() {
                                 : motion.jumpReady ? 'Ready to jump' : 'Return to neutral and lower hands.'
                 statuses.push({
                   id, ready: motion.status === 'tracking' && !gesture.active, status,
-                  jumpRegistered: status === 'Jump registered!', jumpTracking: motion.jumpTracking,
-                  showFeedback: motion.status !== 'tracking' || gesture.active || pointing || !motion.jumpReady
-                    || feedback !== undefined || !!player && player.recovery > 0,
+                  jumpTracking: motion.jumpTracking,
+                  showFeedback: motion.status !== 'tracking' || gesture.active || pointing || !!player && player.recovery > 0,
                 })
               }
-              if (time - lastPreview >= 1000 / 30 || assignments.length === 0) {
-                setTrackedPoses(previews)
-                setTrackedPlayers(statuses)
+              if (time - lastPreview >= 1000 / 15) {
+                if (previewVisibleRef.current) setTrackedPoses(previews)
+                setTrackedPlayers(current => current.length === statuses.length && current.every((player, index) => {
+                  const next = statuses[index]
+                  return player.id === next.id && player.ready === next.ready && player.status === next.status
+                    && player.jumpTracking === next.jumpTracking && player.showFeedback === next.showFeedback
+                }) ? current : statuses)
                 setCalibrationMessage(messages.join(' · '))
                 setCameraStatus(rosterLocked.current
                   ? `${assignments.filter(player => player.poseIndex !== undefined).length}/${players.current.length} players visible. Roster locked for this run.`
                   : 'Stand still to join · up to 4 players.')
                 lastPreview = time
               }
-            }
-            rescheduleDetection.current = () => {
-              cancelDetection()
-              scheduleDetection()
-            }
-            scheduleDetection()
-          } catch (error) {
-            fail(error)
-          }
+          },
+        })
+        await detector.ready
+        if (cancelled) { detector.close(); return }
+        rescheduleDetection.current = () => {
+          cancelDetection()
+          scheduleDetection()
         }
         scheduleDetection()
       } catch (error) {
-        fail(error)
+        if (!cancelled) fail(error)
       }
     }
     void start()
@@ -774,25 +854,29 @@ function App() {
         <div className="game-view">
           <SceneBoundary key={characters.join('-')} onError={handleCharacterError}>
             <Canvas shadows camera={{ position: [0, 2.5, 6], fov: 50 }} onCreated={({ camera }) => camera.lookAt(0, 0.5, 0)}>
-              <World game={game} playerSnapshots={playerSnapshots} onTick={refresh} onFrame={frameRates.game.record} characters={characters} onLoadingChange={setCharacterLoading} playEffect={playEffect} avatars={avatars} timeOfDay={timeOfDay} onProject={projectPicker} onProjectHint={projectMultiplayerHint} showMultiplayerHint={menuVisible && playerSnapshots.length === 1} assisted={assisted} />
+              <World game={game} playerSnapshots={playerSnapshots} onTick={refresh} onFrame={frameRates.game.record} characters={characters} onLoadingChange={setCharacterLoading} playEffect={playEffect} setPowerUpAmbience={audio.setPowerUpAmbience} avatars={avatars} timeOfDay={timeOfDay} onProject={projectPicker} onProjectHint={projectMultiplayerHint} showMultiplayerHint={menuVisible && playerSnapshots.length === 1} assisted={assisted} spawnOverrides={debugEnabled ? spawnOverrides : undefined} />
             </Canvas>
           </SceneBoundary>
           <div className="run-hud">
           {!menuVisible && playerSnapshots.length === 1 && <div className="scoreboard"><div><small>SCORE</small><strong>{String(scoreOf(primaryGame)).padStart(5, '0')}</strong></div><div><small>DISTANCE</small><strong>{Math.floor(primaryGame.distance)}<em> m</em></strong></div><div><small>STARS</small><strong><em>✦ </em>{primaryGame.coins}</strong></div>
-            {mode === 'survival' && <div><small>HEARTS</small><span className="hearts" role="img" aria-label={`${primaryGame.lives} of 5 hearts remaining`}>{Array.from({ length: 5 }, (_, i) => <span key={i} className={i < primaryGame.lives ? '' : 'empty'} aria-hidden="true">♥</span>)}</span></div>}
+            {mode === 'survival' && <div><small>HEARTS</small><span className="hearts" role="img" aria-label={`${primaryGame.lives} hearts remaining`}>{Array.from({ length: 5 }, (_, i) => <span key={i} className={i < primaryGame.lives ? '' : 'empty'} aria-hidden="true">♥</span>)}{primaryGame.lives > 5 && <em aria-hidden="true"> +{primaryGame.lives - 5}</em>}</span></div>}
           </div>}
           {playerSnapshots.length > 1 && <div className="multiplayer-hud" aria-label="Player scores">{playerSnapshots.map(player => <div key={player.id} className={`player-score${player.game.phase === 'over' ? ' out' : ''}`} style={{ borderColor: PLAYER_COLORS[player.id] }}>
             <strong style={{ color: PLAYER_COLORS[player.id] }}>P{player.id + 1}</strong><span>{scoreOf(player.game)} pts · {player.game.coins} stars</span>
-            <small>{player.game.phase === 'over' ? 'OUT' : player.game.recovery > 0 ? player.game.mode === 'survival' ? 'Heart lost' : `Stumble −${player.game.lastPenalty}` : player.game.mode === 'survival' ? `${player.game.lives}/5 hearts` : 'Free Run'}</small>
+            <small>{player.game.phase === 'over' ? 'OUT' : player.game.recovery > 0 ? player.game.mode === 'survival' ? 'Heart lost' : `Stumble −${player.game.lastPenalty}` : player.game.mode === 'survival' ? `${player.game.lives} hearts` : 'Free Run'}</small>
           </div>)}</div>}
           {snapshot.phase === 'running' && <div className="area-badge" role="status">{routeArea(snapshot.distance).label}</div>}
           {cameraOn && snapshot.phase === 'running' && (cameraFeedback.length > 0 || trackedPlayers.length === 0) && <div className={`tracking-hud${cameraFeedback.length > 1 ? ' multiplayer' : ''}`} role="status" aria-label="Camera tracking">
-            {trackedPlayers.length === 0 ? <p>{cameraStatus}</p> : cameraFeedback.map(player => <p key={player.id} className={player.jumpRegistered ? 'registered' : ''}>
+            {trackedPlayers.length === 0 ? <p>{cameraStatus}</p> : cameraFeedback.map(player => <p key={player.id}>
               <strong>P{player.id + 1} · {player.status}</strong>
             </p>)}
           </div>}
           </div>
-          {playerSnapshots.length > 1 && playerSnapshots.map(player => <div key={player.id} ref={element => { playerLabels.current[player.id] = element }} className="player-label" style={{ borderColor: PLAYER_COLORS[player.id], color: PLAYER_COLORS[player.id] }}>P{player.id + 1}</div>)}
+          {snapshot.phase === 'running' && playerSnapshots.filter(player => player.game.phase === 'running' && (player.game.ability || player.game.pickup?.kind === 'life' || player.game.pickup?.kind === 'coin')).map(player => <div
+            key={player.id} ref={element => { playerPowerUps.current[player.id] = element }}
+            className={`runner-powerup${playerSnapshots.length > 1 ? ' multiplayer' : ''}`} hidden
+          ><PowerUpStatus game={player.game} id={player.id} compact={playerSnapshots.length > 1} /></div>)}
+          {playerSnapshots.length > 1 && playerSnapshots.map(player => <div key={player.id} ref={element => { playerLabels.current[player.id] = element }} className="player-label" style={{ borderColor: PLAYER_COLORS[player.id], color:PLAYER_COLORS[player.id] }}>P{player.id + 1}</div>)}
           {snapshot.phase === 'running' && <div className="speedometer">
             <span aria-hidden="true"><small>MAX</small><b>{MAX_RUN_SPEED}</b></span>
             <div className="speed-track" role="meter" aria-label="Running speed" aria-valuemin={MIN_RUN_SPEED} aria-valuemax={MAX_RUN_SPEED} aria-valuenow={snapshot.speed} aria-valuetext={`${snapshot.speed.toFixed(1)} meters per second`}>
@@ -833,6 +917,7 @@ function App() {
           <DifficultyControl id="sidebar-difficulty" value={difficulty} onChange={changeDifficulty} />
           <button className="assisted-toggle" data-hand-action aria-pressed={assisted} aria-describedby="assisted-description" onClick={() => setAssisted(!assisted)}>Assisted mode <span>{assisted ? 'ON' : 'OFF'}</span></button>
           <p id="assisted-description" className="difficulty-timing">Highlight your lane and green takeoff zones before low barriers. Jump inside the zone. Overhead obstacles still need a slide; avoid tall blocks. Guidance only, not automatic jumping.</p>
+          <DebugSettings enabled={debugEnabled} onEnabledChange={setDebugEnabled} value={spawnOverrides} onChange={setSpawnOverrides} />
         </section>
         <div id="camera-controls" className="camera-controls" hidden={settingsView !== 'camera'}>
         <div className="panel camera-panel"><div className="panel-heading"><div><span className="section-number">01 / YOUR CAMERA</span><h2>Get in frame<span>.</span></h2></div><span className="panel-icon">⌗</span></div>
@@ -868,6 +953,7 @@ function App() {
           <div className="control-row"><span className="control-icon">↔</span><div><strong>Move left or right</strong><small>Lean left or right to switch lanes</small></div><kbd>← →</kbd></div>
           <div className="control-row"><span className="control-icon">↑</span><div><strong>Jump over</strong><small>Rise up or raise both hands</small></div><kbd>↑</kbd></div>
           <div className="control-row"><span className="control-icon">↓</span><div><strong>Slide under</strong><small>Crouch to slide; stand to release</small></div><kbd>↓</kbd></div>
+          <div className="control-row"><span className="control-icon">?</span><div><strong>Jump into mystery boxes</strong><small>10-second invincibility, laser sword, auto blaster, fireballs, or a bonus. Swing either arm to slash or throw.</small></div><kbd>X</kbd></div>
           <div className="tip"><span>✦</span><p><strong>Choose your challenge</strong>Free Run deducts up to 100 points per mistake. Survival gives each player five hearts; the run ends when everyone is out.</p></div>
           <div className="tip"><span>↗</span><p><strong>Two hands, two cursors</strong>Aim either hand and hold over a button for 0.6 seconds. Green L is your left hand; blue R is your right. Cross both forearms across your chest and hold still for one second to capture a new neutral position. Uncross before repeating. Tracking continues with this sidebar hidden.</p></div>
           </div>

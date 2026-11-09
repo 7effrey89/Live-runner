@@ -21,7 +21,7 @@ export function AudioSettings({ audio }: { audio: ReturnType<typeof useGameAudio
     <button className="camera-button" data-hand-action={audio.status === 'ready' ? true : undefined} disabled={audio.status === 'loading'} onClick={audio.status === 'ready' ? () => audio.playEffect('coin') : audio.unlock}>
       {audio.status === 'ready' ? 'TEST EFFECT' : audio.status === 'loading' ? 'LOADING SOUND' : audio.status === 'error' ? 'RETRY SOUND' : 'ENABLE SOUND'}
     </button>
-    {audio.error ? <p className="audio-message" role="alert">{audio.error}</p> : <p className="audio-message" role="status">{audio.status === 'ready' ? 'Original ambient arcade music and Kenney effects. Set either volume to 0 to mute it.' : 'Sound starts after a mouse click or keypress. Camera gestures cannot unlock browser audio.'}</p>}
+    {audio.error ? <p className="audio-message" role="alert">{audio.error}</p> : <p className="audio-message" role="status">{audio.status === 'ready' ? 'Original music and synthesized power-up sounds, plus Kenney effects. Set either volume to 0 to mute it.' : 'Sound starts after a mouse click or keypress. Camera gestures cannot unlock browser audio.'}</p>}
     <div className="tip"><span>↗</span><p><strong>Hands-free volume</strong>Hold your hand cursor over the − or + buttons to adjust either channel separately. Camera tracking stays active in this view.</p></div>
   </section>
 }

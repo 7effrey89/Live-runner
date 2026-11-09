@@ -43,14 +43,85 @@ Hips are optional: if either is hidden or low-confidence, shoulder-only controls
 remain available while hip tracking waits for a new stable neutral position.
 Raising both hands still works without moving your hips.
 
-During camera-controlled runs, a large tracking readout stays visible even with
-the sidebar hidden. **Jump registered!** confirms that a jump actually started;
-**Jump queued for landing** means an input is buffered, not started yet.
-The readout also explains tracking loss, calibration, recovery, and menu-pointer
-suppression. Normal ready tracking stays quiet during play; the camera menu
-shows whether hip-assisted or shoulder-only tracking is active.
+During camera-controlled runs, tracking alerts explain tracking loss,
+calibration, recovery, and menu-pointer suppression even with the sidebar
+hidden. Routine jump confirmations and queued-jump messages do not pop up
+over the game. The camera menu retains detailed jump feedback and shows
+whether hip-assisted or shoulder-only tracking is active.
 
 Alternatively, use the arrow keys or WASD to move, jump, and slide (space also jumps). Click Start Run to play, End Run to return to setup, and Play Again after a run. Give yourself enough clear space to move safely.
+
+### Mystery boxes
+
+Jump into the floating purple **?** boxes to reveal a random reward. A soft
+shadow directly beneath each box marks its position on the lane. Walking or
+sliding beneath a box does not collect it or cause a collision. A box replaces
+the first obstacle wave, then appears roughly every 140–168 meters, separated
+from other obstacle waves. Each box's reward is selected once for the shared
+course, but every player must collect their own copy. Sword boxes also select
+their blue, green, purple, or red blade color once, shared by every collector.
+
+- **Invincibility:** pass through obstacles without losing hearts or points,
+  surrounded by colorful sparkles and a gently pulsing, color-cycling glow.
+  Reduced-motion preferences replace the animation with a steady golden glow.
+- **Laser sword:** make a small, deliberate swing with either arm, or press
+  **X** (also **E** in single-player), to break nearby obstacles in your lane.
+  Camera swings require two fresh movement samples and are suppressed during
+  tracking loss, recalibration, recovery, and menu pointing.
+  Each pickup randomly chooses a blue, green, purple, or red blade.
+- **Auto blaster:** automatically shoots the nearest obstacle ahead in your
+  lane, up to 30 meters away, with a 0.45-second firing interval.
+- **Fireballs:** make a small throwing/flicking motion with either hand, or use
+  the sword's attack key, to launch a bouncing fireball from that hand. Throws
+  have a 0.45-second cooldown. Fireballs stay in their launch lane, break the
+  first obstacle they hit, and expire after 40 meters or two seconds.
+- **Bonus:** adds one life in Survival, including above the initial five hearts,
+  or one 50-point coin in Free Run.
+
+Abilities last **10 seconds**. The power-up name, duration bar, and countdown
+follow the runner's chest/back joint, including while jumping, turning, or
+sliding, rather than appearing in the score HUD. The final **3 → 2 → 1**
+seconds are highlighted before the effect disappears. Multiplayer badges use
+compact **INV**, **SWD**, **GUN**, and **FIRE** labels, with full accessible names.
+A new ability replaces
+the previous one and restarts its timer; life/coin bonuses do not interrupt it.
+Weapons never destroy coins or mystery boxes. Effects, rewards, and obstacle
+destruction are independent for each player and clear when the run ends.
+Flying fireballs also clear on ability replacement or expiry.
+
+Power-ups use original synthesized sounds: a pickup chime, energy-blade hum
+and swing, blaster pulses, fireball throws, impact bursts, countdown ticks,
+and an expiry cue. Invincibility has its own original shimmering loop. These
+are not recordings or themes copied from films or other games. Ability sounds
+use the Sound effects volume, respect browser audio unlock and tab visibility,
+and stop when their effect or run ends.
+
+### Debug spawning
+
+Open **Game → Debug mode** to control random spawning. Debug mode is **off by
+default** and its controls stay inside Game settings, not over the game.
+
+- **Lanes:** allow left, center, right, or any combination.
+- **Lane elements:** allow low barriers, overheads, tall blocks, coins, or
+  mystery boxes. Choose just one type to force it on every new wave.
+- **Mystery-box rewards:** allow invincibility, laser swords, auto blasters,
+  fireballs, or the normal mode-specific life/coin bonus.
+- **Sword colors:** allow any combination of blue, green, purple, and red.
+  Select a single color to force it.
+
+Debug waves randomly select one allowed lane and one allowed element, without
+the normal extra coin trail. Boxes independently select an allowed reward and,
+for swords, an allowed color. Selecting only mystery boxes produces a box on
+every wave instead of waiting for the normal mystery-box spacing. Normal wave
+spacing (20–28 meters after the initial 35 meters), pickup rules, collision
+rules, and ten-second ability timers remain unchanged.
+
+Changes apply to **new waves only**, including during a run; they do not
+rewrite or remove items already on the course. Each group keeps at least one
+choice. All players get independent copies of the same selected course items
+and box contents. **Reset spawn choices** restores all choices without turning
+debug mode off. Turning it off restores normal spawning. Settings persist
+across runs in the current page, but reload resets debug mode to off.
 
 ### Webcam multiplayer
 
@@ -82,12 +153,12 @@ After End Run or everyone finishes, players can join during setup again.
 
 Keyboard controls follow the displayed player order:
 
-| Player | Left / right | Jump | Slide |
-|---|---|---|---|
-| First | Arrow keys | Up / Space | Down |
-| Second | A / D | W | S |
-| Third | J / L | I | K |
-| Fourth | F / H | T | G |
+| Player | Left / right | Jump | Slide | Slash / throw |
+|---|---|---|---|---|
+| First | Arrow keys | Up / Space | Down | X |
+| Second | A / D | W | S | E |
+| Third | J / L | I | K | O |
+| Fourth | F / H | T | G | Y |
 
 Single-player retains both arrow keys and WASD. Turning off the camera during
 a run leaves enrolled players available for keyboard controls.
@@ -243,8 +314,22 @@ Their palette textures are bundled locally too; no Sketchfab downloads are used.
 
 ## Camera responsiveness
 
-Camera controls process each new video frame, requesting 60fps when supported.
-The preview overlay is limited to 30fps independently of input detection.
+Camera controls run MediaPipe locally in a dedicated Web Worker, rather than
+blocking Three.js rendering with synchronous inference on the main thread.
+Capture and detection are capped at 30fps. Only one frame can be captured or
+processed at a time: frames arriving while detection is busy are skipped,
+not queued. Each result retains its capture timestamp for gesture timing.
+Up to four players are still detected together, without sending camera frames
+to a server. Background tracking requires Web Workers, ImageBitmap, and
+OffscreenCanvas; unsupported browsers show the existing camera error and can
+still use keyboard controls.
+
+The preview skeleton is limited to 15fps and stops updating when Camera & Guide
+is hidden. Identical player statuses do not trigger extra React updates.
+Movement and gestures still process every completed detection independently
+of the preview, and Tracking FPS counts completed worker results, not camera
+frames or requested detections. Game FPS is independent of Tracking FPS;
+actual performance still depends on CPU/GPU load and the device.
 Short smoothing and two-sample gesture confirmation reduce input delay while
 rejecting isolated tracking spikes; lane transitions are also quicker.
 At 30-60fps, synthetic movement tests confirm deliberate jumps and crouches
@@ -265,7 +350,7 @@ This follows [Celeste's developer explanation of forgiveness](https://www.maddym
 responsive controls widen valid timing windows and buffer input. We do not
 guess that a crouch means a jump merely because a barrier is approaching.
 MediaPipe supplies [observed pose landmarks](https://developers.google.com/edge/mediapipe/solutions/vision/pose_landmarker?tab=Web),
-not an intention classifier; capture and synchronous inference still contribute
+not an intention classifier; capture and background inference still contribute
 latency, so real-camera testing remains important.
 
 Use `npm run build` for a production build and `npm run lint` to check the code.

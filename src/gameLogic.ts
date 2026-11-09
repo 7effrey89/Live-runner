@@ -1,16 +1,23 @@
-import { JUMP_BUFFER_DURATION, JUMP_DURATION } from './runnerMotion.ts'
+import { JUMP_BUFFER_DURATION, JUMP_DURATION, jumpHeight } from './runnerMotion.ts'
 import { DEFAULT_DIFFICULTY, jumpTiming } from './difficulty.ts'
+import { advancePowerUps, destroyObstacle, grantMysteryReward, isObstacle, MYSTERY_REWARDS, SABER_COLORS } from './powerUps.ts'
+import type { ActiveAbility, MysteryReward, Pickup, SaberColor } from './powerUps.ts'
+import type { SoundEffect } from './gameAudio.ts'
+import { SPAWN_LANES, validateSpawnOverrides } from './debugMode.ts'
+import type { SpawnOverrides } from './debugMode.ts'
 
 export type Lane = -1 | 0 | 1
 export type Mode = 'free-run' | 'survival'
-export type Kind = 'barrier' | 'overhead' | 'block' | 'coin'
+export type Kind = 'barrier' | 'overhead' | 'block' | 'coin' | 'mystery'
 export type Fall = { age: number; x: number; y: number; vx: number; vy: number; angle: number; spin: number }
-export type Item = { id: number; lane: Lane; z: number; kind: Kind; hit: boolean; fall?: Fall; jumpContactAt?: number }
+export type Item = { id: number; lane: Lane; z: number; hit: boolean; fall?: Fall; jumpContactAt?: number }
+  & ({ kind: 'mystery'; reward: MysteryReward; saberColor?: SaberColor } | { kind: Exclude<Kind, 'mystery'> })
 export type Game = {
   phase: 'ready' | 'running' | 'over'; mode: Mode; lane: Lane; jump: number; slide: number
   distance: number; coins: number; speed: number; items: Item[]; nextSpawn: number; nextId: number
   lives: number; penalty: number; lastPenalty: number; recovery: number; impact: 'fall' | 'stumble'
   jumpBuffer: number; jumpId: number; difficulty: number; time: number; lastJumpAt: number
+  nextMystery: number; nextProjectileId: number; ability?: ActiveAbility; pickup?: Pickup
 }
 export const FREE_RUN_PENALTY = 100
 export const RECOVERY_DURATION = 1.6
@@ -24,7 +31,7 @@ export const newGame = (mode: Mode = 'free-run', difficulty = DEFAULT_DIFFICULTY
   phase: 'ready', mode, lane: 0, jump: 0, slide: 0, distance: 0,
   coins: 0, speed: MIN_RUN_SPEED, items: [], nextSpawn: 35, nextId: 0, jumpBuffer: 0, jumpId: 0,
   lives: 5, penalty: 0, lastPenalty: 0, recovery: 0, impact: 'stumble',
-  difficulty, time: 0, lastJumpAt: -Infinity,
+  difficulty, time: 0, lastJumpAt: -Infinity, nextMystery: 0, nextProjectileId: 0,
 })
 export const scoreOf = (game: Game) => Math.max(0, Math.floor(game.distance) + game.coins * 50 - game.penalty)
 export const fallOpacity = (age: number) => Math.max(0, Math.min(1, (FALL_DURATION - age) / 1.8))
@@ -43,9 +50,13 @@ export function requestJump(game: Game) {
 }
 
 export function hitObstacle(game: Game, item: Item) {
-  if (item.kind === 'coin' || item.fall || game.phase !== 'running') return false
-  item.hit = true
-  item.fall = { age: 0, x: 0, y: 0, vx: item.id % 2 ? -2.8 : 2.8, vy: 2.6, angle: 0, spin: 2.8 }
+  if (!isObstacle(item) || item.hit || item.fall || game.phase !== 'running') return false
+  if (game.ability?.kind === 'invisibility' && game.ability.remaining > 0) {
+    item.hit = true
+    delete item.jumpContactAt
+    return false
+  }
+  destroyObstacle(item)
   if (game.recovery > 0) return false
   game.recovery = RECOVERY_DURATION
   game.impact = item.kind === 'block' ? 'fall' : 'stumble'
@@ -58,7 +69,11 @@ export function hitObstacle(game: Game, item: Item) {
     game.penalty += game.lastPenalty
   } else {
     game.lives = Math.max(0, game.lives - 1)
-    if (game.lives === 0) game.phase = 'over'
+    if (game.lives === 0) {
+      game.phase = 'over'
+      delete game.ability
+      delete game.pickup
+    }
   }
   return true
 }
@@ -100,8 +115,10 @@ export function recoveryPose(remaining: number, kind: Game['impact']) {
   }
 }
 
-export function advanceGame(game: Game, delta: number, random = Math.random, options: { spawn?: boolean; collisions?: boolean } = {}) {
-  const sounds: ('coin' | 'crash' | 'jump')[] = []
+export function advanceGame(game: Game, delta: number, random = Math.random, options: { spawn?: boolean; collisions?: boolean; spawnOverrides?: SpawnOverrides } = {}) {
+  const overrides = options.spawnOverrides
+  if (overrides) validateSpawnOverrides(overrides)
+  const sounds: SoundEffect[] = []
   game.recovery = Math.max(0, game.recovery - delta)
   const running = game.phase === 'running'
   const dt = Math.min(delta, 0.05)
@@ -126,12 +143,27 @@ export function advanceGame(game: Game, delta: number, random = Math.random, opt
       sounds.push('jump')
     }
     game.nextSpawn -= travel
+    game.nextMystery -= travel
     if (game.nextSpawn <= 0 && options.spawn !== false) {
-      const lane = (Math.floor(random() * 3) - 1) as Lane
-      const kinds: Kind[] = ['barrier', 'overhead', 'block']
-      game.items.push({ id: game.nextId++, lane, z: -85, kind: kinds[Math.floor(random() * 3)], hit: false })
-      const coinLane = (lane === 1 ? -1 : lane + 1) as Lane
-      for (let i = 0; i < 3; i++) game.items.push({ id: game.nextId++, lane: coinLane, z: -85 - i * 3, kind: 'coin', hit: false })
+      const lanes = overrides?.lanes ?? SPAWN_LANES
+      const lane = lanes[Math.floor(random() * lanes.length)]
+      const choice = random()
+      const kinds = overrides?.kinds ?? (game.nextMystery <= 0 ? ['mystery'] as const : ['barrier', 'overhead', 'block'] as const)
+      const kind = kinds[Math.floor(choice * kinds.length)]
+      if (kind === 'mystery') {
+        const rewards = overrides?.rewards ?? MYSTERY_REWARDS
+        const reward = rewards[Math.floor((overrides ? random() : choice) * rewards.length)]
+        const colors = overrides?.saberColors ?? SABER_COLORS
+        const saberColor = reward === 'sword' ? colors[Math.floor(random() * colors.length)] : undefined
+        game.items.push({ id: game.nextId++, lane, z: -85, kind: 'mystery', reward, saberColor, hit: false })
+        game.nextMystery = 140
+      } else {
+        game.items.push({ id: game.nextId++, lane, z: -85, kind, hit: false })
+      }
+      if (!overrides) {
+        const coinLane = (lane === 1 ? -1 : lane + 1) as Lane
+        for (let i = 0; i < 3; i++) game.items.push({ id: game.nextId++, lane: coinLane, z: -85 - i * 3, kind: 'coin', hit: false })
+      }
       game.nextSpawn = 20 + random() * 8
     }
   }
@@ -142,11 +174,21 @@ export function advanceGame(game: Game, delta: number, random = Math.random, opt
     if (item.fall) {
       advanceFall(item.fall, delta)
       item.z += travel * 0.12
+    } else if (running && game.phase === 'running') {
+      item.z += travel
+    }
+  }
+  sounds.push(...advancePowerUps(game, delta, options.collisions !== false))
+  for (const item of game.items) {
+    if (item.fall) continue
+    if (!running || game.phase !== 'running') continue
+    if (options.collisions === false) continue
+    if (!item.hit && isObstacle(item) && game.ability?.kind === 'invisibility' && game.ability.remaining > 0
+      && (item.jumpContactAt !== undefined || Math.abs(item.z) < COLLISION_HALF_LENGTH && item.lane === game.lane)) {
+      item.hit = true
+      delete item.jumpContactAt
       continue
     }
-    if (!running || game.phase !== 'running') continue
-    item.z += travel
-    if (options.collisions === false) continue
     // Keep an already-contacted barrier unresolved briefly so a late real jump
     // can save it; a crouch or lane change alone cannot dismiss the contact.
     if (item.jumpContactAt !== undefined) {
@@ -161,7 +203,12 @@ export function advanceGame(game: Game, delta: number, random = Math.random, opt
       continue
     }
     if (item.hit || Math.abs(item.z) >= COLLISION_HALF_LENGTH || item.lane !== game.lane) continue
-    if (item.kind === 'coin') {
+    if (item.kind === 'mystery') {
+      if (game.recovery === 0 && jumpHeight(game.jump) > .65 && grantMysteryReward(game, item.reward, item.saberColor)) {
+        item.hit = true
+        sounds.push('powerup')
+      }
+    } else if (item.kind === 'coin') {
       item.hit = true
       game.coins++
       sounds.push('coin')
@@ -171,6 +218,6 @@ export function advanceGame(game: Game, delta: number, random = Math.random, opt
       item.jumpContactAt = game.time
     } else if (hitObstacle(game, item)) sounds.push('crash')
   }
-  game.items = game.items.filter(item => item.fall ? item.fall.age < FALL_DURATION : game.phase !== 'over' && item.z < 8 && !(item.hit && item.kind === 'coin'))
+  game.items = game.items.filter(item => item.fall ? item.fall.age < FALL_DURATION : game.phase !== 'over' && item.z < 8 && !(item.hit && (item.kind === 'coin' || item.kind === 'mystery')))
   return sounds
 }

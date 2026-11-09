@@ -74,6 +74,6 @@ function GuideRibbon({ game, item, id, offset, count }: { game: RefObject<Game>;
 export function AssistedGuidance({ game, items, id, offset, count }: { game: RefObject<Game>; items: readonly Item[]; id: number; offset: number; count: number }) {
   return <group name={`assisted-guidance-${id}`}>
     <GuideRibbon game={game} id={id} offset={offset} count={count} />
-    {items.filter(item => item.kind === 'barrier' && !item.hit && !item.fall).map(item => <GuideRibbon key={item.id} game={game} item={item} id={id} offset={offset} count={count} />)}
+    {items.filter(item => (item.kind === 'barrier' || item.kind === 'mystery') && !item.hit && !item.fall).map(item => <GuideRibbon key={item.id} game={game} item={item} id={id} offset={offset} count={count} />)}
   </group>
 }

@@ -60,8 +60,9 @@ export function useGameAudio() {
   useEffect(() => engine.current?.setVolumes(musicVolume, effectsVolume), [musicVolume, effectsVolume])
   const unlock = useCallback(() => { void unlockRef.current?.() }, [])
   const playEffect = useCallback((effect: SoundEffect) => engine.current?.play(effect), [])
+  const setPowerUpAmbience = useCallback((sword: boolean, invincibility: boolean) => engine.current?.setPowerUpAmbience(sword, invincibility), [])
   return {
-    musicVolume, effectsVolume, status, error, unlock, playEffect,
+    musicVolume, effectsVolume, status, error, unlock, playEffect, setPowerUpAmbience,
     setMusicVolume: (value: number) => setMusic(validateVolume(value)),
     setEffectsVolume: (value: number) => setEffects(validateVolume(value)),
   }
